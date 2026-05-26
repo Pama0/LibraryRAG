@@ -1,11 +1,11 @@
 import os
 
 import chromadb
-from llama_index.core import SimpleDirectoryReader, StorageContext, VectorStoreIndex
-
+from llama_index.core import StorageContext, VectorStoreIndex, Document
+from llama_index.core.node_parser import SentenceSplitter
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
-from core.rag.parser import ArticleSplitter
+from core.rag.pdf_parser import BookPDFParser
 
 
 class RAGIndexManager:
@@ -14,7 +14,7 @@ class RAGIndexManager:
     def __init__(
             self,
             persist_dir: str = "./chroma_db",
-            collection_name: str = "documents",
+            collection_name: str = "book_knowledge",
     ):
         self.persist_dir = persist_dir
         self.collection_name = collection_name
@@ -24,14 +24,10 @@ class RAGIndexManager:
         self.vector_store = ChromaVectorStore(chroma_collection=self.chroma_collection)
         self.storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
 
-        self.splitter = ArticleSplitter(
-            include_chapter_context=False
-        )
-
         if self.chroma_collection.count() > 0:
             self.index = VectorStoreIndex.from_vector_store(
                 self.vector_store,
-                storage_context=self.storage_context
+                storage_context=self.storage_context,
             )
         else:
             self.index = None
@@ -63,68 +59,108 @@ class RAGIndexManager:
         print(f"  删除旧节点: {file_name} ({len(node_ids)} 个)")
 
 
-    def add_documents(self, data_dir: str, recursive: bool = True):
-        """增量添加文档 - 按文件变更检测"""
+    def add_book(
+        self,
+        pdf_path: str,
+        book_title: str,
+        chunk_size: int = 1000,
+        chunk_overlap: int = 150,
+    ):
+        """入库单本技术书籍 PDF
+
+        Args:
+            pdf_path: PDF 文件路径
+            book_title: 书名，如《深入理解MySQL核心技术》
+            chunk_size: 分块大小（字符数）
+            chunk_overlap: 块间重叠字符数
+
+        Returns:
+            index 对象，已创建或更新
+        """
+        if not os.path.exists(pdf_path):
+            raise FileNotFoundError(f"PDF 文件不存在: {pdf_path}")
+
+        # 检查是否已入库（基于文件路径）
         indexed_info = self._get_indexed_file_info()
+        existing = indexed_info.get(pdf_path)
+        if existing:
+            self._delete_nodes_by_file(pdf_path, existing["node_ids"])
+            print(f"  {book_title} 已有索引，重建中...")
 
-        # 反向清理：数据库中存在但文件已删除的，直接删除
-        deleted_count = 0
-        for fpath, info in indexed_info.items():
-            if not os.path.exists(fpath):
-                self._delete_nodes_by_file(fpath, info["node_ids"])
-                deleted_count += 1
+        print(f"  解析 PDF: {book_title} ...")
+        parser = BookPDFParser(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        documents = parser.parse(pdf_path, book_title)
+        print(f"    检测到 {len(documents)} 个文档块")
 
-        reader = SimpleDirectoryReader(
-            input_dir=data_dir,
-            recursive=recursive,
-            exclude=[
-                ".venv", "venv", "node_modules", "__pycache__",
-                ".git", ".idea", ".claude",
-            ],
+        # 二次切分
+        text_splitter = SentenceSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
         )
+        nodes = text_splitter.get_nodes_from_documents(documents)
+        print(f"    切分为 {len(nodes)} 个节点")
 
-        file_count = 0
-        skip_count = 0
-        update_count = 0
+        # 入库
+        if self.index is None:
+            self.index = VectorStoreIndex(nodes, storage_context=self.storage_context)
+        else:
+            self.index.insert_nodes(nodes)
 
-        for documents in reader.iter_data(show_progress=True):
-            if not documents:
+        print(f"  {book_title} 入库完成，向量总数: {self.chroma_collection.count()}")
+        return self.index
+
+    def add_book_quick(
+        self,
+        pdf_path: str,
+        book_title: str,
+    ):
+        """快速入库：跳过章节检测，仅按页分块（作为降级方案）
+
+        适用于章节字体特征不明显或扫描版 PDF（已 OCR）。
+        """
+        import fitz
+
+        if not os.path.exists(pdf_path):
+            raise FileNotFoundError(f"PDF 文件不存在: {pdf_path}")
+
+        # 检查重复
+        indexed_info = self._get_indexed_file_info()
+        existing = indexed_info.get(pdf_path)
+        if existing:
+            self._delete_nodes_by_file(pdf_path, existing["node_ids"])
+
+        print(f"  快速解析 PDF: {book_title} ...")
+        doc = fitz.open(pdf_path)
+        documents = []
+
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text()
+            if not text.strip():
                 continue
+            documents.append(Document(
+                text=text,
+                metadata={
+                    "book_title": book_title,
+                    "chapter": "",
+                    "page": page_num + 1,
+                    "content_type": "text",
+                    "file_path": pdf_path,
+                    "chunk_type": "book_chunk",
+                },
+            ))
+        doc.close()
 
-            # 从第一个 document 的 metadata 获取文件信息
-            doc_meta = documents[0].metadata
-            fpath = doc_meta.get("file_path", "")
-            fsize = str(doc_meta.get("file_size", ""))
-            fmodified = doc_meta.get("last_modified_date", "")
+        text_splitter = SentenceSplitter(chunk_size=500, chunk_overlap=50)
+        nodes = text_splitter.get_nodes_from_documents(documents)
+        print(f"    切分为 {len(nodes)} 个节点 ({len(documents)} 页)")
 
-            # 对比指纹：file_size + last_modified_date
-            existing = indexed_info.get(fpath)
-            if existing and existing["file_size"] == fsize and existing["last_modified_date"] == fmodified:
-                skip_count += 1
-                continue
+        if self.index is None:
+            self.index = VectorStoreIndex(nodes, storage_context=self.storage_context)
+        else:
+            self.index.insert_nodes(nodes)
 
-            # 文件变更：先删旧节点
-            if existing:
-                self._delete_nodes_by_file(fpath, existing["node_ids"])
-                update_count += 1
-            else:
-                print(f"  新增文件: {fpath}")
-
-            # 切片
-            nodes = self.splitter.get_nodes_from_documents(documents)
-
-            # 索引
-            if self.index is None:
-                self.index = VectorStoreIndex(
-                    nodes,
-                    storage_context=self.storage_context,
-                )
-            else:
-                self.index.insert_nodes(nodes)
-
-            file_count += 1
-
-        print(f"处理完成: 新增/更新 {file_count} 个文件, 跳过 {skip_count} 个未变更, 清理 {deleted_count} 个已删除, {self.chroma_collection.count()} 个向量")
+        print(f"  {book_title} 入库完成，向量总数: {self.chroma_collection.count()}")
         return self.index
 
     def get_query_engine(self, llm, similarity_top_k: int = 3):
@@ -136,3 +172,4 @@ class RAGIndexManager:
     def get_index(self):
         """获取索引对象"""
         return self.index
+
