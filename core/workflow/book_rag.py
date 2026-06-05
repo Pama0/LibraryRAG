@@ -1,7 +1,9 @@
 """book 知识库 RAG workflow：judge_query → retrieve → synthesize。
 
-judge_query 步骤判定 query 是否够明确：宽泛则自动改写，最多 MAX_ROUNDS 轮，
-再进入检索。指代/缺上下文类问题由 Agent 层 system_prompt 解决，不在此处理。
+judge_query 步骤先规范化 query（纠错、缩写展开），再判定是否够明确：宽泛则
+自动收窄改写，最多 MAX_ROUNDS 轮，再进入检索。规范化对所有 query 生效，明确的
+query 也用纠错后的版本检索。指代/缺上下文类问题由 Agent 层 system_prompt 解决，
+不在此处理。
 """
 import json
 from typing import Optional
@@ -20,16 +22,23 @@ from llama_index.core.workflow import (
 
 MAX_ROUNDS = 2
 
-_JUDGE_PROMPT = """你是检索 query 质量判定器。判断下面的 query 作为技术书籍知识库的检索词是否足够明确具体。
+_JUDGE_PROMPT = """你是检索 query 处理器，对下面的 query 依次做两步：先规范化，再判定明确性。
 
-判定标准：
+第一步 规范化（始终执行，只改形式不改意图）：
+- 纠正错别字、明显的同音/形近字错误（如"装饰起"→"装饰器"）。
+- 统一全半角、大小写。
+- 仅展开毫无歧义的常见技术缩写（如 K8s→Kubernetes）。
+规范化只修形式，严禁改变用户意图或新增用户没提到的话题。
+
+第二步 判定明确性（基于规范化后的 query）：
 - 明确：指向具体的技术概念/章节/问题，能检索到精准内容。
 - 不明确：过于宽泛或模糊（如"讲讲数据库"、"介绍一下"），检索会命中很杂。
+若不明确，在规范化结果基础上改写得更具体——只能在原语义范围内收窄，严禁新增约束或话题。
 
-如果不明确，把它改写得更具体——但只能在原 query 的语义范围内收窄，严禁新增用户没提到的约束或话题。
+rewritten_query 始终返回处理后的 query：明确时返回规范化结果，不明确时返回规范化+收窄结果。
 
 只返回 JSON，不要其他任何内容：
-{{"clear": true 或 false, "rewritten_query": "改写后的 query（若已明确则原样返回）"}}
+{{"clear": true 或 false, "rewritten_query": "处理后的 query"}}
 
 query：{query}"""
 
@@ -83,13 +92,14 @@ class BookRagWorkflow(Workflow):
     async def _decide(self, query: str, round: int) -> tuple[str, str]:
         """决定下一步。返回 (action, query)，action ∈ {'retrieve', 'rewrite'}。
 
+        明确时返回规范化（纠错）后的 query，宽泛时返回收窄改写；
         达到 MAX_ROUNDS 直接检索，不再调用 LLM。
         """
         if round >= MAX_ROUNDS:
             return "retrieve", query
         clear, rewritten = await self._judge_query(query)
         if clear:
-            return "retrieve", query
+            return "retrieve", rewritten
         return "rewrite", rewritten
 
     def _make_filters(self, book_title: Optional[str]):

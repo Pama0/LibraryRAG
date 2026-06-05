@@ -80,6 +80,15 @@ async def test_decide_clear_routes_to_retrieve():
     assert q == "B+树"
 
 
+async def test_decide_clear_uses_corrected_query():
+    # 带错别字但语义明确：判定 clear，但 query 被纠错，应带纠错后的进检索
+    llm = FakeLLM(['{"clear": true, "rewritten_query": "Python的装饰器"}'])
+    wf = _make_wf(llm)
+    action, q = await wf._decide("Python的装饰起", round=0)
+    assert action == "retrieve"
+    assert q == "Python的装饰器"   # 用纠错后的，而非原始带错字的
+
+
 async def test_decide_unclear_routes_to_rewrite():
     llm = FakeLLM(['{"clear": false, "rewritten_query": "数据库索引原理"}'])
     wf = _make_wf(llm)
