@@ -23,10 +23,46 @@ _current_sources: ContextVar[Optional[list]] = ContextVar(
     "current_sources", default=None
 )
 
+CLARIFY_MAX = 1  # 每个用户回合最多澄清次数，防止 Agent↔workflow 反复澄清死循环
+
+# 用单元素 list 作共享可变容器（而非 int）：consume_clarify 在工具子任务里调用，
+# 必须靠"原地改对象"跨 context 传播；若 .set() 重新绑定 int 则不回流父/兄弟任务。
+# 与 _current_sources 用 extend 同理。
+_clarify_budget: ContextVar[Optional[list]] = ContextVar("clarify_budget", default=None)
+
+# 请求级查询范围：用户手动选择的书名列表（硬约束，是唯一的书籍过滤来源）。
+# None / 空 表示全库；Agent 不再自行指定书名。
+_scope_books: ContextVar[Optional[list]] = ContextVar("scope_books", default=None)
+
 
 def begin_collection() -> None:
-    """请求开始时调用，重置收集器"""
+    """请求开始时调用，重置收集器、澄清预算与查询范围（按用户回合自动归位）"""
     _current_sources.set([])
+    _clarify_budget.set([CLARIFY_MAX])
+    _scope_books.set(None)  # 由 handler 随后 set_scope 显式注入
+
+
+def set_scope(books: Optional[list]) -> None:
+    """请求级：写入用户手动选择的查询范围。空/None 视为全库。"""
+    _scope_books.set(list(books) if books else None)
+
+
+def get_scope() -> Optional[list]:
+    """读取当前请求的用户选定查询范围；None 表示未选（全库）。"""
+    return _scope_books.get()
+
+
+def can_clarify() -> bool:
+    """当前回合是否还有澄清预算。未 begin_collection 的路径默认 False（倒向检索，不阻塞）。"""
+    bucket = _clarify_budget.get()
+    return bool(bucket) and bucket[0] > 0
+
+
+def consume_clarify() -> None:
+    """消费一次澄清预算（原地改，跨子任务 context 共享）。"""
+    bucket = _clarify_budget.get()
+    if bucket:
+        bucket[0] = max(0, bucket[0] - 1)
 
 
 def add_sources(refs: list) -> None:

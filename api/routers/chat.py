@@ -10,16 +10,9 @@ from core.persistence import repositories as repo
 from core.agent.agent import BookAgent
 from core.persistence.db import get_session
 from api.schemas import ChatRequest, ChatResponse, SourceRef
-from core.agent.source_context import begin_collection, get_sources
+from core.agent.source_context import begin_collection, get_sources, set_scope
 
 logger = logging.getLogger(__name__)
-
-
-def _wrap_message(req: ChatRequest) -> str:
-    """把可选 book_title 拼到用户消息里作为提示给 Agent"""
-    if req.book_title:
-        return f"（请在《{req.book_title}》中查找）{req.message}"
-    return req.message
 
 
 async def _ensure_session(session_id: Optional[str]) -> str:
@@ -55,9 +48,10 @@ def create_chat_router(agent_service: BookAgent) -> APIRouter:
             memory = agent_service.build_memory(history)
 
             begin_collection()
+            set_scope(req.book_titles)  # 注入用户选定的硬查询范围
             try:
                 response = await agent_service.agent.run(
-                    user_msg=_wrap_message(req),
+                    user_msg=req.message,
                     memory=memory,
                 )
             except Exception as e:
@@ -86,8 +80,8 @@ def create_chat_router(agent_service: BookAgent) -> APIRouter:
 
         session_id = await _ensure_session(req.session_id)
         logger.info(
-            "chat_stream: session=%s msg=%r book=%s",
-            session_id, req.message[:50], req.book_title,
+            "chat_stream: session=%s msg=%r",
+            session_id, req.message[:50],
         )
 
         lock = agent_service.get_lock(session_id)
@@ -103,13 +97,16 @@ def create_chat_router(agent_service: BookAgent) -> APIRouter:
                 is_first = len(history) == 0
 
                 begin_collection()
+                set_scope(req.book_titles)  # 注入用户选定的硬查询范围
                 try:
                     handler = agent_service.agent.run(
-                        user_msg=_wrap_message(req),
+                        user_msg=req.message,
                         memory=memory,
                     )
 
                     async for ev in handler.stream_events():
+                        if ev.__class__.__name__ != "AgentStream":  # 跳过逐 token 增量，避免刷屏
+                            logger.info("AGENT EVENT %s\n  %s", ev.__class__.__name__, _debug_dump(ev))
                         payload = _format_event(ev)
                         if payload is not None:
                             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -146,6 +143,18 @@ def create_chat_router(agent_service: BookAgent) -> APIRouter:
 
     return router
 
+
+def _debug_dump(ev) -> str:
+    """把事件的关键字段完整抽出来写日志（不截断），便于查看 agent 思考轨迹。
+
+    不取 delta（逐 token 增量，会刷屏；完整答案见 response / final_text）。
+    """
+    parts = []
+    for attr in ("input", "response", "tool_name", "tool_kwargs", "tool_output", "current_agent_name"):
+        val = getattr(ev, attr, None)
+        if val:
+            parts.append(f"{attr}={val!s}")
+    return "\n  ".join(parts)
 
 async def _persist_pair(
     session_id: str,

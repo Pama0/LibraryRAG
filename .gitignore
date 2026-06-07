@@ -24,6 +24,9 @@ storage/
 # SQLite 数据库（运行时生成）
 *.db
 
+# 运行时日志
+logs/
+
 # 上传的书籍 PDF 数据（运行时生成，体积大）
 data/books/*
 !data/books/.gitkeep
