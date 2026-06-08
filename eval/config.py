@@ -27,7 +27,12 @@ EVAL_EMBED_MODEL = "BAAI/bge-small-zh-v1.5"
 
 
 def make_eval_llm():
-    """评测 judge LLM：llm_factory + DeepSeek OpenAI 兼容端点。"""
+    """评测 judge LLM：llm_factory + DeepSeek OpenAI 兼容端点。
+
+    deepseek-v4-flash 是思考模型，默认会把输出预算烧在 reasoning_content 上、
+    content 返回空，导致 instructor 结构化解析失败（IncompleteOutputException）。
+    必须关闭 thinking（同 configs/llm.py 的处理），并放大 max_tokens（ragas 默认仅 1024）。
+    """
     import openai
     from ragas.llms import llm_factory
 
@@ -35,7 +40,12 @@ def make_eval_llm():
         base_url=EVAL_LLM_BASE_URL,
         api_key=os.getenv("DEEPSEEK_API_KEY"),
     )
-    return llm_factory(EVAL_LLM_MODEL, client=client)
+    return llm_factory(
+        EVAL_LLM_MODEL,
+        client=client,
+        extra_body={"thinking": {"type": "disabled"}},
+        max_tokens=2048,
+    )
 
 
 def make_eval_embeddings():
