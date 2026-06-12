@@ -18,7 +18,7 @@
 AnswerDelta→delta）。这些【流式专用事件】定义在 qa_capability，此处 re-export 供
 api 层按既有路径 import；它们不参与 workflow step 图。
 
-未完成处以 TODO 标注（assume 声明角度、study_plan 能力）。
+未完成处以 TODO 标注（study_plan 能力）。
 """
 from typing import Optional
 
@@ -71,7 +71,7 @@ class SplitEvent(Event):
 
 
 class AssumeEvent(Event):
-    """ambiguous → 先声明所选角度再回答（v1 先按整句直接检索）。"""
+    """ambiguous → 归纳评判维度 + 声明所选角度后逐维度回答。"""
 
     rewritten_query: str
 
