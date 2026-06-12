@@ -77,18 +77,22 @@ class QaCapability:
 
     # ── 预处理：降噪 + 难度/明确性分类（不再消指代）──────────────────
     async def classify(
-        self, clean_query: str, book_titles: Optional[list[str]] = None
+        self,
+        clean_query: str,
+        book_titles: Optional[list[str]] = None,
+        probe: bool = True,
     ):
         """先用 clean_query 探测召回，把召回信号喂给 judge，堵住「盲判」。
 
-        probe 失败（index 空/异常）→ 容错为空上下文，judge 退回纯文本判定，不阻塞。
+        probe=False（ablation baseline）→ 不探测、纯文本判定；probe 失败亦容错为空。
         """
         retrieval_context = ""
-        try:
-            probe = await self._retrieve_nodes(clean_query, book_titles)
-            retrieval_context = self._format_probe(probe, book_titles)
-        except Exception as exc:
-            logger.warning("classify probe 探测失败，退回纯文本判定：%s", exc)
+        if probe:
+            try:
+                located = await self._retrieve_nodes(clean_query, book_titles)
+                retrieval_context = self._format_probe(located, book_titles)
+            except Exception as exc:
+                logger.warning("classify probe 探测失败，退回纯文本判定：%s", exc)
         return await self.preprocessor.run(clean_query, retrieval_context)
 
     def _format_probe(self, nodes: list, book_titles) -> str:

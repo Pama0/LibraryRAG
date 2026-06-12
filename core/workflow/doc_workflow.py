@@ -118,6 +118,10 @@ class DocQueryWorkflow(Workflow):
         llm: LLM,
         similarity_top_k: int = 5,
         max_sub_queries: int = 6,
+        probe_then_classify: bool = True,
+        split_enabled: bool = True,
+        assume_enabled: bool = True,
+        other_agent_enabled: bool = True,
         **kw,
     ):
         super().__init__(**kw)
@@ -126,6 +130,11 @@ class DocQueryWorkflow(Workflow):
         self.router = IntentRouter(llm)
         self.qa = QaCapability(index_manager, llm, similarity_top_k, max_sub_queries)
         self.qa_agent = QaAgent(index_manager, llm, similarity_top_k, max_iterations=6)
+        # 决策开关（评测 ablation 用；off → 对应分支降级单轮 retrieve、probe 关闭）
+        self._probe = probe_then_classify
+        self._split_enabled = split_enabled
+        self._assume_enabled = assume_enabled
+        self._other_agent_enabled = other_agent_enabled
 
     # ── 入口：把 memory + 原始 query + scope 全塞进 ctx，贯穿全程 ──
     @step
@@ -165,7 +174,7 @@ class DocQueryWorkflow(Workflow):
         clean_query = await ctx.store.get("clean_query")
         book_titles = await ctx.store.get("book_titles")
 
-        result = await self.qa.classify(clean_query, book_titles)
+        result = await self.qa.classify(clean_query, book_titles, probe=self._probe)
 
         await ctx.store.set("rewritten_query", result.rewritten_query)
         await ctx.store.set("category", result.category)
@@ -219,6 +228,9 @@ class DocQueryWorkflow(Workflow):
         agent 异常 → 降级单轮检索，绝不让 other 比单轮更脆。
         """
         book_titles = await ctx.store.get("book_titles")
+        if not self._other_agent_enabled:
+            answer, nodes = await self.qa.retrieve(ctx, ev.rewritten_query, book_titles)
+            return FinalizeEvent(answer=answer, source_nodes=nodes)
         try:
             answer, nodes = await self.qa_agent.run(
                 ctx, ev.rewritten_query, book_titles
@@ -233,13 +245,19 @@ class DocQueryWorkflow(Workflow):
     @step
     async def split_branch(self, ctx: Context, ev: SplitEvent) -> FinalizeEvent:
         book_titles = await ctx.store.get("book_titles")
-        answer, nodes = await self.qa.split(ctx, ev.rewritten_query, book_titles)
+        if self._split_enabled:
+            answer, nodes = await self.qa.split(ctx, ev.rewritten_query, book_titles)
+        else:
+            answer, nodes = await self.qa.retrieve(ctx, ev.rewritten_query, book_titles)
         return FinalizeEvent(answer=answer, source_nodes=nodes)
 
     @step
     async def assume_branch(self, ctx: Context, ev: AssumeEvent) -> FinalizeEvent:
         book_titles = await ctx.store.get("book_titles")
-        answer, nodes = await self.qa.assume(ctx, ev.rewritten_query, book_titles)
+        if self._assume_enabled:
+            answer, nodes = await self.qa.assume(ctx, ev.rewritten_query, book_titles)
+        else:
+            answer, nodes = await self.qa.retrieve(ctx, ev.rewritten_query, book_titles)
         return FinalizeEvent(answer=answer, source_nodes=nodes)
 
     # ── 反问：本轮终止，把反问句作为答案，由 finalize 写回记忆等用户补充 ──
@@ -264,4 +282,13 @@ class DocQueryWorkflow(Workflow):
             "finalize: answer_len=%d source_nodes=%d",
             len(ev.answer or ""), len(ev.source_nodes or []),
         )
-        return StopEvent(result=Response(response=ev.answer, source_nodes=ev.source_nodes))
+        # 把 category/intent 附到结果 metadata，供评测算分类准确率/分支分布（api 不受影响）
+        meta = {
+            "category": await ctx.store.get("category", None),
+            "intent": await ctx.store.get("intent", None),
+        }
+        return StopEvent(
+            result=Response(
+                response=ev.answer, source_nodes=ev.source_nodes, metadata=meta
+            )
+        )

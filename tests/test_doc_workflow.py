@@ -272,7 +272,7 @@ async def test_preprocess_passes_book_titles_to_classify():
 
     captured = {}
 
-    async def fake_classify(clean_query, book_titles=None):
+    async def fake_classify(clean_query, book_titles=None, probe=True):
         captured["clean"] = clean_query
         captured["books"] = book_titles
         from core.workflow.query_preprocess import PreprocessResult
@@ -288,3 +288,46 @@ async def test_preprocess_passes_book_titles_to_classify():
     await wf.run(query="openclaw是什么", memory=FakeMemory(), book_titles=["openclaw"])
     assert captured["clean"] == "openclaw是什么"
     assert captured["books"] == ["openclaw"]   # scope 透传到 probe
+
+
+async def test_flags_off_degrade_branches_to_single_retrieve():
+    # split flag 关 → pending_split 走单轮 retrieve（baseline 对比用）
+    llm = FakeLLM([
+        '{"intent": "qa", "clean_query": "讲讲MySQL"}',
+        '{"category": "pending_split", "rewritten_query": "讲讲MySQL", "reason": "需罗列"}',
+    ])
+    wf = DocQueryWorkflow(
+        index_manager=None, llm=llm, similarity_top_k=3, timeout=10,
+        split_enabled=False, assume_enabled=False, other_agent_enabled=False,
+        probe_then_classify=False,
+    )
+    used = {}
+
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
+        used["retrieve"] = True
+        return "单轮答案", ["n1"]
+
+    async def boom_split(ctx, query, book_titles):
+        raise AssertionError("split 不应被调用（flag off）")
+
+    wf.qa.retrieve = fake_retrieve
+    wf.qa.split = boom_split
+    result = await wf.run(query="讲讲MySQL", memory=FakeMemory())
+    assert used.get("retrieve") is True
+    assert str(result.response) == "单轮答案"
+
+
+async def test_finalize_exposes_category_in_metadata():
+    llm = FakeLLM([
+        '{"intent": "qa", "clean_query": "MySQL锁"}',
+        '{"category": "retrievable", "rewritten_query": "MySQL锁"}',
+    ])
+    wf = _wf(llm)
+
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
+        return "答案", ["n1"]
+
+    wf.qa.retrieve = fake_retrieve
+    result = await wf.run(query="MySQL锁", memory=FakeMemory())
+    assert result.metadata.get("category") == "retrievable"
+    assert result.metadata.get("intent") == "qa"
