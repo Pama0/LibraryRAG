@@ -281,3 +281,27 @@ async def test_assume_empty_located_and_no_dimensions_returns_scope_hint():
     assert nodes == []
     assert "某本书" in answer
     assert "没有检索到" in answer
+
+
+# ── retrieve preamble：降级声明假设、尽力答 ──────────────────────────
+async def test_retrieve_with_preamble_prepends_declaration_and_emits_delta():
+    qa = _qa(FakeIndexManager(nodes=["n1"]))
+
+    async def fake_synth(ctx, query, nodes):
+        return "正文答案"
+
+    qa._synthesize_stream = fake_synth
+    ctx = FakeCtx()
+
+    text, nodes = await qa.retrieve(ctx, "这个索引", None, preamble="（注：按最可能解读作答）")
+    assert text == "（注：按最可能解读作答）正文答案"
+    deltas = [e.delta for e in ctx.events if e.__class__.__name__ == "AnswerDeltaEvent"]
+    assert "（注：按最可能解读作答）" in deltas
+
+
+async def test_retrieve_empty_nodes_ignores_preamble():
+    qa = _qa(FakeIndexManager(nodes=[]))
+    ctx = FakeCtx()
+    text, nodes = await qa.retrieve(ctx, "这个索引", ["书"], preamble="（注：声明）")
+    assert nodes == []
+    assert "（注：声明）" not in text   # 空命中只给范围提示，不带声明

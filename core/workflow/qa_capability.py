@@ -79,17 +79,27 @@ class QaCapability:
 
     # ── 分支：单轮检索 + 流式合成 ────────────────────────────────────
     async def retrieve(
-        self, ctx: Context, query: str, book_titles: Optional[list[str]]
+        self,
+        ctx: Context,
+        query: str,
+        book_titles: Optional[list[str]],
+        preamble: str = "",
     ) -> tuple[str, list]:
-        """直接检索 + 流式合成（绕开 agent/工具）。返回 (答案文本, source_nodes)。"""
+        """直接检索 + 流式合成（绕开 agent/工具）。返回 (答案文本, source_nodes)。
+
+        preamble 非空 → 进入答案阶段后先推一个 AnswerDeltaEvent，并拼在答案最前
+        （供 missing_info 预算耗尽降级时声明"按最可能解读作答"）。空命中不带声明。
+        """
         ctx.write_event_to_stream(RetrievalStartEvent(query=query))
         nodes = await self._retrieve_nodes(query, book_titles)
         ctx.write_event_to_stream(RetrievalDoneEvent(count=len(nodes)))
         if not nodes:
             scope = f"《{'》《'.join(book_titles)}》中" if book_titles else "知识库中"
             return f"在{scope}没有检索到与「{query}」相关的内容。", []
+        if preamble:
+            ctx.write_event_to_stream(AnswerDeltaEvent(delta=preamble))
         answer = await self._synthesize_stream(ctx, query, nodes)
-        return answer, nodes
+        return (preamble + answer if preamble else answer), nodes
 
     async def assume(
         self, ctx: Context, query: str, book_titles: Optional[list[str]]
