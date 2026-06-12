@@ -131,28 +131,46 @@ class QaCapability:
             answer = await self._synthesize_stream(ctx, query, located)
             return answer, located
 
-        # 3) 逐项检索（先全检索，便于只发一次 RetrievalDone）
-        sections: list[tuple[str, list]] = []
+        # 3-4) 逐项检索 + map-reduce 汇总（与 assume 共用同一 helper）
+        sections = [(sq, sq) for sq in sub_queries]
+        return await self._retrieve_and_reduce(ctx, sections, book_titles)
+
+    # ── 公共流水线：逐项检索 → 一次 RetrievalDone →（可选声明）→ 逐节合成拼接 ──
+    async def _retrieve_and_reduce(
+        self,
+        ctx: Context,
+        sections: list[tuple[str, str]],
+        book_titles: Optional[list[str]],
+        preamble: str = "",
+    ) -> tuple[str, list]:
+        """sections: [(分节标题, 检索/合成用子查询)]。split / assume 共用。
+
+        - 先全检索（便于只发一次 RetrievalDone）。
+        - preamble 非空 → 进入答案阶段后先推一个 AnswerDeltaEvent，并拼在答案最前。
+        - 每节：推标题 delta → 流式合成该节（空命中给占位）。
+        """
+        retrieved: list = []
         all_nodes: list = []
-        for sq in sub_queries:
-            ns = await self._retrieve_nodes(sq, book_titles)
-            sections.append((sq, ns))
+        for _heading, sub_query in sections:
+            ns = await self._retrieve_nodes(sub_query, book_titles)
+            retrieved.append(ns)
             all_nodes.extend(ns)
         ctx.write_event_to_stream(RetrievalDoneEvent(count=len(all_nodes)))
 
-        # 4) 汇总（map-reduce）：每子项各自合成一段，按骨架拼接
         parts: list[str] = []
-        for sq, ns in sections:
-            heading = f"\n## {sq}\n"
-            ctx.write_event_to_stream(AnswerDeltaEvent(delta=heading))
+        if preamble:
+            ctx.write_event_to_stream(AnswerDeltaEvent(delta=preamble))
+            parts.append(preamble)
+        for (heading, sub_query), ns in zip(sections, retrieved):
+            h = f"\n## {heading}\n"
+            ctx.write_event_to_stream(AnswerDeltaEvent(delta=h))
             body = (
-                await self._synthesize_stream(ctx, sq, ns)
+                await self._synthesize_stream(ctx, sub_query, ns)
                 if ns
                 else "（未检索到相关内容）"
             )
-            parts.append(heading + body)
-        answer = "".join(parts).strip()
-        return answer, all_nodes
+            parts.append(h + body)
+        return "".join(parts).strip(), all_nodes
 
     # ── helpers：章节 / 检索 / 流式合成 ──────────────────────────────
     def _book_chapters(self, book_titles: Optional[list[str]]) -> list[str]:
