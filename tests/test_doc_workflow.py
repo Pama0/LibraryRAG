@@ -74,14 +74,29 @@ class FakeIndexManager:
         return self._index
 
 
+class _FakeStore:
+    def __init__(self):
+        self._d = {}
+
+    async def get(self, k, default=None):
+        return self._d.get(k, default)
+
+    async def set(self, k, v):
+        self._d[k] = v
+
+
 class FakeCtx:
-    """只实现 _answer 用到的 write_event_to_stream（同步）。"""
+    """实现 split_branch / _answer 用到的 write_event_to_stream + store。"""
 
     def __init__(self):
         self.events = []
+        self.store = _FakeStore()
 
     def write_event_to_stream(self, ev):
         self.events.append(ev)
+
+    async def store_set(self, k, v):  # 测试便捷入口
+        await self.store.set(k, v)
 
 
 def _wf(llm, index_manager=None):
@@ -240,3 +255,83 @@ async def test_synthesize_stream_emits_delta_per_token_and_joins():
     assert text == "合成答案"
     deltas = [e.delta for e in ctx.events if e.__class__.__name__ == "AnswerDeltaEvent"]
     assert deltas == ["合", "成", "答", "案"]
+
+
+# ── split_branch：拆解 → 逐项检索 → map-reduce 汇总 ──────────────────
+def _split_wf():
+    """构造一个 wf 并 stub 掉外部依赖，聚焦 split_branch 接线。"""
+    wf = _wf(FakeLLM([]))
+    wf._book_chapters = lambda book_titles: ["3.2.1 工具A", "3.2.2 工具B"]
+
+    async def fake_retrieve(query, book_titles):
+        # 定位与各子查询都返回带 chapter 的假节点
+        class N:
+            metadata = {"chapter": "3.2.1 工具A"}
+
+            def get_content(self):
+                return "正文"
+
+        return [N()]
+
+    wf._retrieve_nodes = fake_retrieve
+
+    async def fake_synth(ctx, query, nodes):
+        return f"[{query}的合成]"
+
+    wf._synthesize_stream = fake_synth
+    return wf
+
+
+async def test_split_branch_decomposes_and_concatenates_sections():
+    wf = _split_wf()
+
+    async def fake_decompose(clean_query, headings, passages, max_items):
+        return ["工具A 是什么", "工具B 怎么用"]
+
+    wf.decomposer.run = fake_decompose
+    ctx = FakeCtx()
+    from core.workflow.doc_workflow import SplitEvent
+
+    await ctx.store_set("book_titles", ["openclaw"])  # 见下方 FakeCtx.store 扩展
+    ev = SplitEvent(rewritten_query="openclaw 的工具系统")
+    result = await wf.split_branch(ctx, ev)
+
+    # 答案按子项分节拼接
+    assert "## 工具A 是什么" in result.answer
+    assert "## 工具B 怎么用" in result.answer
+    assert "[工具A 是什么的合成]" in result.answer
+
+
+async def test_split_branch_emits_single_retrieval_done_and_section_headings():
+    wf = _split_wf()
+
+    async def fake_decompose(clean_query, headings, passages, max_items):
+        return ["子项1", "子项2"]
+
+    wf.decomposer.run = fake_decompose
+    ctx = FakeCtx()
+    await ctx.store_set("book_titles", ["openclaw"])
+    from core.workflow.doc_workflow import SplitEvent
+
+    await wf.split_branch(ctx, SplitEvent(rewritten_query="q"))
+    names = [e.__class__.__name__ for e in ctx.events]
+    assert names.count("RetrievalDoneEvent") == 1          # 只发一次
+    headings = [e.delta for e in ctx.events if e.__class__.__name__ == "AnswerDeltaEvent"]
+    assert any("## 子项1" in h for h in headings)
+    assert any("## 子项2" in h for h in headings)
+
+
+async def test_split_branch_falls_back_to_single_retrieve_when_no_subqueries():
+    wf = _split_wf()
+
+    async def empty_decompose(clean_query, headings, passages, max_items):
+        return []
+
+    wf.decomposer.run = empty_decompose
+    ctx = FakeCtx()
+    await ctx.store_set("book_titles", ["openclaw"])
+    from core.workflow.doc_workflow import SplitEvent
+
+    result = await wf.split_branch(ctx, SplitEvent(rewritten_query="openclaw 工具系统"))
+    # 降级：直接对整句合成
+    assert result.answer == "[openclaw 工具系统的合成]"
