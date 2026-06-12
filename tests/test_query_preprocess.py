@@ -84,12 +84,13 @@ async def test_run_prompt_has_no_history_section():
     assert "对话历史" not in llm.prompts[0]
 
 
-async def test_run_takes_only_clean_query():
-    # 签名应是 run(clean_query)，不再接收 memory
+async def test_run_takes_clean_query_and_retrieval_context_no_memory():
+    # 签名应是 run(clean_query, retrieval_context=...)，不接收 memory（指代消解在 router）
     import inspect
 
     params = list(inspect.signature(QueryPreprocessor.run).parameters)
-    assert params == ["self", "clean_query"]
+    assert params == ["self", "clean_query", "retrieval_context"]
+    assert "memory" not in params
 
 
 async def test_run_missing_info_carries_clarify_question():
