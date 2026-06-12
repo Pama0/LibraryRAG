@@ -305,3 +305,50 @@ async def test_retrieve_empty_nodes_ignores_preamble():
     text, nodes = await qa.retrieve(ctx, "这个索引", ["书"], preamble="（注：声明）")
     assert nodes == []
     assert "（注：声明）" not in text   # 空命中只给范围提示，不带声明
+
+
+# ── classify：probe-then-classify ───────────────────────────────────
+class _PNode:
+    def __init__(self, content, book="openclaw", chapter="3.2"):
+        self._c = content
+        self.metadata = {"book_title": book, "chapter": chapter}
+
+    def get_content(self):
+        return self._c
+
+
+async def test_classify_probes_then_passes_context_to_preprocessor():
+    qa = _qa(FakeIndexManager(nodes=[_PNode("openclaw 是一个工具")]))
+    captured = {}
+
+    async def fake_run(clean_query, retrieval_context=""):
+        captured["ctx"] = retrieval_context
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("retrievable", clean_query)
+
+    qa.preprocessor.run = fake_run
+    await qa.classify("给我讲明白openclaw", ["openclaw"])
+    assert "openclaw 是一个工具" in captured["ctx"]   # 探测片段进了召回上下文
+    assert "《openclaw》" in captured["ctx"]           # 章节分布进了上下文
+
+
+async def test_classify_degrades_when_probe_fails():
+    qa = _qa(index_manager=None)   # 无 index → probe 抛错
+    captured = {}
+
+    async def fake_run(clean_query, retrieval_context=""):
+        captured["ctx"] = retrieval_context
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("retrievable", clean_query)
+
+    qa.preprocessor.run = fake_run
+    result = await qa.classify("openclaw", ["openclaw"])
+    assert captured["ctx"] == ""           # probe 失败 → 空上下文，不阻塞
+    assert result.category == "retrievable"
+
+
+def test_format_probe_empty_and_nonempty():
+    qa = _qa()
+    assert "未召回" in qa._format_probe([], None)
+    out = qa._format_probe([_PNode("片段X", book="A", chapter="1.1")], None)
+    assert "共命中 1 段" in out and "《A》1.1" in out and "片段X" in out

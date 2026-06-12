@@ -76,9 +76,42 @@ class QaCapability:
         self.dimensioner = DimensionExtractor(llm)
 
     # ── 预处理：降噪 + 难度/明确性分类（不再消指代）──────────────────
-    async def classify(self, clean_query: str):
-        """对 clean_query 做降噪 + 分类，返回 PreprocessResult（category/rewritten/reason）。"""
-        return await self.preprocessor.run(clean_query)
+    async def classify(
+        self, clean_query: str, book_titles: Optional[list[str]] = None
+    ):
+        """先用 clean_query 探测召回，把召回信号喂给 judge，堵住「盲判」。
+
+        probe 失败（index 空/异常）→ 容错为空上下文，judge 退回纯文本判定，不阻塞。
+        """
+        retrieval_context = ""
+        try:
+            probe = await self._retrieve_nodes(clean_query, book_titles)
+            retrieval_context = self._format_probe(probe, book_titles)
+        except Exception as exc:
+            logger.warning("classify probe 探测失败，退回纯文本判定：%s", exc)
+        return await self.preprocessor.run(clean_query, retrieval_context)
+
+    def _format_probe(self, nodes: list, book_titles) -> str:
+        """探测召回 → 喂 judge 的信号：命中数 + 章节分布 + top 截断片段。"""
+        if not nodes:
+            return "知识库未召回到任何相关内容。"
+        dist: list[str] = []
+        seen: set = set()
+        for n in nodes:
+            meta = getattr(n, "metadata", None) or {}
+            tag = f"《{meta.get('book_title', '?')}》{meta.get('chapter', '')}".strip()
+            if tag not in seen:
+                seen.add(tag)
+                dist.append(tag)
+        lines: list[str] = []
+        for i, n in enumerate(nodes[:5], 1):
+            meta = getattr(n, "metadata", None) or {}
+            tag = f"《{meta.get('book_title', '?')}》{meta.get('chapter', '')}".strip()
+            content = (
+                n.get_content() if hasattr(n, "get_content") else getattr(n, "text", "")
+            )[:150]
+            lines.append(f"{i}. [{tag}] {content}")
+        return f"共命中 {len(nodes)} 段，分布：{'、'.join(dist)}\n" + "\n".join(lines)
 
     # ── 分支：单轮检索 + 流式合成 ────────────────────────────────────
     async def retrieve(
