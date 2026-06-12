@@ -58,9 +58,13 @@ class PreprocessEvent(Event):
 
 
 class RetrieveAgentEvent(Event):
-    """retrievable / other / 降级 → 直接检索 + 合成。"""
+    """retrievable / other / 降级 → 直接检索 + 合成。
+
+    assumption_note 非空（missing_info 预算耗尽降级）→ 答案前声明所作假设。
+    """
 
     rewritten_query: str
+    assumption_note: str = ""
 
 
 class SplitEvent(Event):
@@ -81,6 +85,7 @@ class ClarifyEvent(Event):
 
     rewritten_query: str
     clarify_reason: str = ""
+    clarify_question: str = ""
 
 
 class FinalizeEvent(Event):
@@ -158,9 +163,18 @@ class DocQueryWorkflow(Workflow):
             case "missing_info":
                 if await ctx.store.get("allow_clarify"):
                     return ClarifyEvent(
-                        rewritten_query=rewritten, clarify_reason=result.reason
+                        rewritten_query=rewritten,
+                        clarify_reason=result.reason,
+                        clarify_question=result.clarify_question,
                     )
-                return RetrieveAgentEvent(rewritten_query=rewritten)  # 预算耗尽降级
+                # 预算耗尽降级：不反问，声明假设、尽力答
+                note = (
+                    f"（注：原问题信息不足（{result.reason}），"
+                    f"以下按最可能的解读作答。）\n"
+                )
+                return RetrieveAgentEvent(
+                    rewritten_query=rewritten, assumption_note=note
+                )
             case _:  # retrievable / other / 解析失败 fallback
                 return RetrieveAgentEvent(rewritten_query=rewritten)
 
@@ -175,7 +189,9 @@ class DocQueryWorkflow(Workflow):
     @step
     async def retrieve_branch(self, ctx: Context, ev: RetrieveAgentEvent) -> FinalizeEvent:
         book_titles = await ctx.store.get("book_titles")
-        answer, nodes = await self.qa.retrieve(ctx, ev.rewritten_query, book_titles)
+        answer, nodes = await self.qa.retrieve(
+            ctx, ev.rewritten_query, book_titles, ev.assumption_note
+        )
         return FinalizeEvent(answer=answer, source_nodes=nodes)
 
     @step
@@ -193,7 +209,8 @@ class DocQueryWorkflow(Workflow):
     # ── 反问：本轮终止，把反问句作为答案，由 finalize 写回记忆等用户补充 ──
     @step
     async def clarify_branch(self, ctx: Context, ev: ClarifyEvent) -> FinalizeEvent:
-        question = f"为了更准确地回答，请补充：{ev.clarify_reason}"
+        # 优先用 LLM 产出的自然反问句；缺失则退回模板拼 reason（绝不阻塞）
+        question = ev.clarify_question or f"为了更准确地回答，请补充：{ev.clarify_reason}"
         # 反问句经 finalize 作为 assistant turn 进会话记忆，
         # 下一轮门口才能同时看到「原问题 + 反问 + 用户补充」一起消解。
         return FinalizeEvent(answer=question, source_nodes=[])

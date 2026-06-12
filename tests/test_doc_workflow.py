@@ -71,7 +71,7 @@ async def test_qa_intent_feeds_clean_query_and_scope_to_answer():
 
     captured = {}
 
-    async def fake_retrieve(ctx, query, book_titles):
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
         captured["query"] = query
         captured["book_titles"] = book_titles
         return "答案", ["n1"]
@@ -95,7 +95,7 @@ async def test_route_passes_selected_books_to_router():
     ])
     wf = _wf(llm)
 
-    async def fake_retrieve(ctx, query, book_titles):
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
         return "答案", []
 
     wf.qa.retrieve = fake_retrieve
@@ -111,7 +111,7 @@ async def test_qa_preprocess_consumes_clean_query_not_original():
     ])
     wf = _wf(llm)
 
-    async def fake_retrieve(ctx, query, book_titles):
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
         return "答案", []
 
     wf.qa.retrieve = fake_retrieve
@@ -130,7 +130,7 @@ async def test_router_parse_failure_defaults_to_qa_path():
 
     captured = {}
 
-    async def fake_retrieve(ctx, query, book_titles):
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
         captured["query"] = query
         return "答案", []
 
@@ -150,7 +150,7 @@ async def test_missing_info_clarifies_without_retrieval():
 
     called = {"retrieve": False}
 
-    async def fake_retrieve(ctx, query, book_titles):
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
         called["retrieve"] = True
         return "不应被调用", []
 
@@ -159,3 +159,38 @@ async def test_missing_info_clarifies_without_retrieval():
     result = await wf.run(query="这个索引的应用场景", memory=FakeMemory())
     assert called["retrieve"] is False            # 反问，不检索
     assert "指代不明" in str(result.response)
+
+
+# ── missing_info：自然反问 / 预算耗尽降级声明假设 ──────────────────────
+async def test_missing_info_uses_natural_clarify_question():
+    llm = FakeLLM([
+        '{"intent": "qa", "clean_query": "这个索引的应用场景"}',
+        '{"category": "missing_info", "rewritten_query": "这个索引的应用场景", "reason": "指代不明", "clarify_question": "你说的「这个索引」指哪一个？B+树还是全文索引？"}',
+    ])
+    wf = _wf(llm)
+    result = await wf.run(query="这个索引的应用场景", memory=FakeMemory())
+    assert "你说的「这个索引」指哪一个" in str(result.response)
+
+
+async def test_missing_info_budget_exhausted_assumes_and_answers():
+    llm = FakeLLM([
+        '{"intent": "qa", "clean_query": "这个索引的应用场景"}',
+        '{"category": "missing_info", "rewritten_query": "这个索引的应用场景", "reason": "指代不明"}',
+    ])
+    wf = _wf(llm)
+
+    captured = {}
+
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
+        captured["query"] = query
+        captured["preamble"] = preamble
+        return preamble + "尽力答", ["n1"]
+
+    wf.qa.retrieve = fake_retrieve
+
+    result = await wf.run(
+        query="这个索引的应用场景", memory=FakeMemory(), allow_clarify=False
+    )
+    assert "按最可能的解读作答" in captured["preamble"]   # 声明假设
+    assert "尽力答" in str(result.response)
+    assert result.source_nodes == ["n1"]                   # 确实检索了（未反问）
