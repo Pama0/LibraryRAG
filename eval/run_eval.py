@@ -42,6 +42,8 @@ async def score_row(row: dict, sut: RagSystem, metric_specs: list[MetricSpec]) -
         "reference": row.get("reference", ""),
         "response": out.response,
         "outcome": out.outcome,
+        "category": out.category,                       # SUT 实际判的 category
+        "expected_category": row.get("category", ""),   # 测试集金标准标注
         "num_contexts": len(out.retrieved_contexts),
     }
     if out.outcome != "answered":
@@ -57,11 +59,20 @@ async def score_row(row: dict, sut: RagSystem, metric_specs: list[MetricSpec]) -
 
 
 def aggregate(rows: list[dict]) -> dict:
-    """指标均值（仅 answered 行、忽略 None）+ outcome 分布。"""
+    """指标均值（仅 answered 行、忽略 None）+ outcome/category 分布 + 分类准确率。"""
     outcomes: dict[str, int] = {}
+    cat_dist: dict[str, int] = {}
+    cls_total = cls_correct = 0
     for r in rows:
         oc = r.get("outcome", "error")
         outcomes[oc] = outcomes.get(oc, 0) + 1
+        cat = r.get("category") or ""
+        if cat:
+            cat_dist[cat] = cat_dist.get(cat, 0) + 1
+        exp = r.get("expected_category")
+        if exp:
+            cls_total += 1
+            cls_correct += int(cat == exp)
     answered = [r for r in rows if r.get("outcome") == "answered"]
     metric_means: dict[str, float | None] = {}
     for name in METRIC_NAMES:
@@ -71,6 +82,12 @@ def aggregate(rows: list[dict]) -> dict:
         "total": len(rows),
         "answered": len(answered),
         "outcome_distribution": outcomes,
+        "category_distribution": cat_dist,
+        "classification": {
+            "total": cls_total,
+            "correct": cls_correct,
+            "accuracy": (cls_correct / cls_total) if cls_total else None,
+        },
         "metric_means": metric_means,
     }
 

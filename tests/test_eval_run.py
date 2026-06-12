@@ -79,3 +79,27 @@ async def test_score_row_non_answered_skips_metrics():
     res = await score_row({"user_input": "Q", "reference": "R"}, _FakeSUT(out), specs)
     assert res["outcome"] == "clarify"
     assert "faithfulness" not in res
+
+
+# ── 分类准确率 / category 分布 ──
+def test_aggregate_classification_accuracy_and_distribution():
+    rows = [
+        {"outcome": "answered", "category": "retrievable", "expected_category": "retrievable"},
+        {"outcome": "answered", "category": "other", "expected_category": "retrievable"},  # 误判
+        {"outcome": "empty", "category": "missing_info", "expected_category": "missing_info"},
+    ]
+    rep = aggregate(rows)
+    assert rep["classification"]["accuracy"] == 2 / 3   # 2/3 判对
+    assert rep["classification"]["correct"] == 2
+    assert rep["category_distribution"]["other"] == 1
+    assert rep["category_distribution"]["retrievable"] == 1
+
+
+async def test_score_row_carries_category_and_expected():
+    out = RagOutput(response="A", retrieved_contexts=["c"], outcome="answered", category="other")
+    specs = [MetricSpec("faithfulness", _FakeMetric(0.9), lambda r, o: {})]
+    res = await score_row(
+        {"user_input": "Q", "reference": "R", "category": "retrievable"}, _FakeSUT(out), specs
+    )
+    assert res["category"] == "other"                  # SUT 实际判的
+    assert res["expected_category"] == "retrievable"   # 测试集金标准标注

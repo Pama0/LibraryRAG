@@ -1,0 +1,8 @@
+{"user_input": "给我讲明白openclaw", "category": "retrievable", "scope": null, "reference": "<openclaw 的核心定义，按你书库内容填>", "reference_contexts": ["<相关原文片段>"]}
+{"user_input": "openclaw是什么", "category": "retrievable", "scope": null, "reference": "<openclaw 定义>", "reference_contexts": ["<片段>"]}
+{"user_input": "讲讲MySQL", "category": "pending_split", "scope": null, "reference": "<MySQL 主题概览：连接管理/解析优化/存储引擎等>", "reference_contexts": ["<片段>"]}
+{"user_input": "MySQL聚簇索引和二级索引的区别", "category": "pending_split", "scope": null, "reference": "<两类索引的区别>", "reference_contexts": ["<片段>"]}
+{"user_input": "这个索引的应用场景是什么", "category": "missing_info", "scope": null, "reference": "", "reference_contexts": []}
+{"user_input": "Redis做缓存好吗", "category": "ambiguous", "scope": null, "reference": "<从性能/一致性/成本等角度的评判>", "reference_contexts": ["<片段>"]}
+{"user_input": "综合对比 openclaw 与传统方案的架构取舍", "category": "other", "scope": null, "reference": "<跨主题综合 + 权衡分析>", "reference_contexts": ["<片段>"]}
+{"user_input": "MVCC是怎么实现的", "category": "retrievable", "scope": null, "reference": "<MVCC 通过 undo log + ReadView 实现>", "reference_contexts": ["<片段>"]}
