@@ -115,3 +115,18 @@ async def test_run_classifies_other_for_complex_open_question():
     result = await _pp(llm).run("综合对比 openclaw 与传统方案的架构取舍")
     assert result.category == "other"
     assert result.reason == "跨主题综合 + 开放权衡"
+
+
+async def test_run_injects_retrieval_context_into_prompt():
+    llm = FakeLLM(['{"category": "retrievable", "rewritten_query": "openclaw 是什么"}'])
+    ctx = "共命中 8 段，分布：《openclaw》第3章\n1. [《openclaw》3.2] openclaw 是一个用于……"
+    await _pp(llm).run("openclaw 是什么", retrieval_context=ctx)
+    assert "知识库探测召回" in llm.prompts[0]      # 召回块进了 prompt
+    assert "《openclaw》第3章" in llm.prompts[0]   # 召回内容进了 prompt
+
+
+async def test_run_without_retrieval_context_still_works():
+    # 向后兼容：不传 retrieval_context 仍可判定（probe 失败时退回纯文本）
+    llm = FakeLLM(['{"category": "retrievable", "rewritten_query": "MySQL锁"}'])
+    result = await _pp(llm).run("MySQL锁")
+    assert result.category == "retrievable"
