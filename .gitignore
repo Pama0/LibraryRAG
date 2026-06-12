@@ -38,6 +38,8 @@ data/books/*
 # 前端依赖与构建产物
 node_modules/
 frontend/dist/
+frontend/.vite/
+frontend/tsconfig.tsbuildinfo
 
 # 临时文件
 temp_data/
