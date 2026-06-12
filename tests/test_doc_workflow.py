@@ -264,3 +264,27 @@ async def test_other_falls_back_to_single_retrieve_when_agent_raises(caplog):
     assert str(result.response) == "降级单轮答案"   # agent 抛错 → 降级 qa.retrieve
     assert result.source_nodes == ["n1"]
     assert any("other agent 失败" in r.getMessage() for r in caplog.records)  # 降级显形
+
+
+async def test_preprocess_passes_book_titles_to_classify():
+    llm = FakeLLM(['{"intent": "qa", "clean_query": "openclaw是什么"}'])  # 仅 Router 调 LLM
+    wf = _wf(llm)
+
+    captured = {}
+
+    async def fake_classify(clean_query, book_titles=None):
+        captured["clean"] = clean_query
+        captured["books"] = book_titles
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("retrievable", clean_query)
+
+    wf.qa.classify = fake_classify
+
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
+        return "答案", []
+
+    wf.qa.retrieve = fake_retrieve
+
+    await wf.run(query="openclaw是什么", memory=FakeMemory(), book_titles=["openclaw"])
+    assert captured["clean"] == "openclaw是什么"
+    assert captured["books"] == ["openclaw"]   # scope 透传到 probe

@@ -163,8 +163,9 @@ class DocQueryWorkflow(Workflow):
         self, ctx: Context, ev: PreprocessEvent
     ) -> "RetrieveAgentEvent | SplitEvent | AssumeEvent | ClarifyEvent | OtherEvent":
         clean_query = await ctx.store.get("clean_query")
+        book_titles = await ctx.store.get("book_titles")
 
-        result = await self.qa.classify(clean_query)
+        result = await self.qa.classify(clean_query, book_titles)
 
         await ctx.store.set("rewritten_query", result.rewritten_query)
         await ctx.store.set("category", result.category)
