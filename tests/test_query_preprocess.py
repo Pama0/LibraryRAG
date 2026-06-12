@@ -103,3 +103,12 @@ async def test_run_clarify_question_defaults_empty_when_absent():
     llm = FakeLLM(['{"category": "retrievable", "rewritten_query": "MySQL锁"}'])
     result = await _pp(llm).run("MySQL锁")
     assert result.clarify_question == ""
+
+
+async def test_run_classifies_other_for_complex_open_question():
+    llm = FakeLLM([
+        '{"category": "other", "rewritten_query": "综合对比 openclaw 与传统方案的架构取舍", "reason": "跨主题综合 + 开放权衡"}'
+    ])
+    result = await _pp(llm).run("综合对比 openclaw 与传统方案的架构取舍")
+    assert result.category == "other"
+    assert result.reason == "跨主题综合 + 开放权衡"
