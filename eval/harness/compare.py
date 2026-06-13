@@ -53,9 +53,9 @@ VARIANTS = {
 
 async def _run_variants(testset_path, limit, names):
     from eval.config import CHROMA_DIR, make_eval_embeddings, make_eval_llm
-    from eval.metrics import build_metric_specs
-    from eval.run_eval import load_testset, score_row, aggregate
-    from eval.sut import DocQueryWorkflowSystem
+    from eval.harness.metrics import build_metric_specs
+    from eval.harness.run_eval import load_testset, score_row, aggregate
+    from eval.harness.sut import DocQueryWorkflowSystem
     from configs.embedding import configure_embedding
     from configs.llm import configure_llm
     from core.rag.data_loader import RAGIndexManager

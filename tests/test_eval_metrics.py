@@ -1,5 +1,5 @@
-from eval.metrics import METRIC_KWARGS, MetricSpec
-from eval.sut import RagOutput
+from eval.harness.metrics import METRIC_KWARGS, MetricSpec
+from eval.harness.sut import RagOutput
 
 
 def _row():

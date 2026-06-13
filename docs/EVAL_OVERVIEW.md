@@ -34,7 +34,7 @@
 
 ## 2. 被测系统（SUT）：决策路由 RAG
 
-评测对象是 `core/workflow/DocQueryWorkflow`，由 `eval/sut.py` 的 `DocQueryWorkflowSystem` 包装成统一 `answer(query)` 接口。它的核心是**两层决策**：
+评测对象是 `core/workflow/DocQueryWorkflow`，由 `eval/harness/sut.py` 的 `DocQueryWorkflowSystem` 包装成统一 `answer(query)` 接口。它的核心是**两层决策**：
 
 ### Layer 1 · 门口（IntentRouter）
 `intent_router.py`：净化 query（消指代 + 纠错 + 规范化）→ 分意图 `qa / study_plan / chitchat`。
@@ -116,21 +116,29 @@ ragas 自动集**只产窄事实题**（单 chunk 锚定），五类里只覆盖
 
 ---
 
-## 6. 脚本地图（eval/*.py）
+## 6. 脚本地图（eval/ 按功能分包）
 
-| 脚本 | 职责 |
-|------|------|
-| `config.py` | 评测 judge LLM / embedding / 路径（CHROMA_DIR、各数据集路径） |
-| `sut.py` | 被测系统适配器：`DocQueryWorkflowSystem`（带决策 flag）、`RagOutput` |
-| `metrics.py` | 5 个 ragas 指标的字段映射 + 装配 |
-| `generate_testset.py` | ragas `TestsetGenerator` 自动生成草稿（A+B 中文约束） |
-| `run_eval.py` | 单变体跑分：逐行 SUT→打分→聚合，存 CSV 到 `results/` |
-| `compare.py` | **主力**：多变体 ablation，渲染 baseline vs 变体 delta 表，`--out` 落盘 |
-| `build_split_candidates.py` | 造 split/other/retrievable 候选（离散度筛子 + 措辞模板） |
-| `build_ambiguous_missing.py` | 造 ambiguous/missing_info 候选 |
-| `merge_golden.py` | 合并候选 → golden.jsonl |
-| `jsonl_to_csv.py` | testset jsonl → csv 便于人工看 |
-| `poc_*.py` | 章节摘要法的探索性 PoC（样板，非主流程） |
+```
+eval/
+├── config.py          评测 judge LLM / embedding / 路径（顶层，大家都 import）
+├── harness/           评测引擎
+│   ├── sut.py           被测系统适配器：DocQueryWorkflowSystem（带决策 flag）、RagOutput
+│   ├── metrics.py       5 个 ragas 指标的字段映射 + 装配
+│   ├── run_eval.py      单变体跑分：逐行 SUT→打分→聚合，存 CSV 到 results/
+│   └── compare.py       【主力】多变体 ablation，delta 表，--out 落盘 / --detail 明细 CSV
+├── datagen/           测试集 + 金标准生成
+│   ├── generate_testset.py        ragas TestsetGenerator 自动生成草稿（A+B 中文约束）
+│   ├── build_split_candidates.py  造 split/other/retrievable（离散度筛子 + 措辞模板）
+│   ├── build_ambiguous_missing.py 造 ambiguous/missing_info
+│   ├── merge_golden.py            合并候选 → golden.jsonl
+│   └── fill_reference.py          慷慨检索补 reference
+├── poc/               章节摘要法探索性 PoC（样板，非主流程）
+│   └── poc_chapter_summary.py / poc_classify_check.py / poc_chapter_loop.py
+├── utils/
+│   └── jsonl_to_csv.py            testset jsonl → csv 便于人工看
+├── dataset/           测试集与金标准数据
+└── results/           run_eval 落盘的 ragas CSV
+```
 
 ---
 
@@ -138,13 +146,19 @@ ragas 自动集**只产窄事实题**（单 chunk 锚定），五类里只覆盖
 
 ```powershell
 # 冒烟（前 5 条，确认链路通）
-python -m eval.compare --testset eval/dataset/golden.jsonl --limit 5 --variants "baseline(全单轮)" "+probe"
+python -m eval.harness.compare --testset eval/dataset/golden.jsonl --limit 5 --variants "baseline(全单轮)" "+probe"
 
-# 全量对比表，落盘到 docs/
-python -m eval.compare --testset eval/dataset/golden.jsonl --variants "baseline(全单轮)" "+probe" --out docs/compare_golden.md
+# 全量对比表，落盘到 docs/（--detail 另存每条明细 CSV）
+python -m eval.harness.compare --testset eval/dataset/golden.jsonl --variants "baseline(全单轮)" "+probe" --out docs/compare_golden.md --detail docs/compare_golden_detail.csv
 
 # 逐步加决策
-python -m eval.compare --testset eval/dataset/golden.jsonl --variants "baseline(全单轮)" "+probe" "+probe+split" "全开"
+python -m eval.harness.compare --testset eval/dataset/golden.jsonl --variants "baseline(全单轮)" "+probe" "+probe+split" "全开"
+
+# 其它入口：生成测试集 / 造金标准 / 补 reference
+python -m eval.datagen.generate_testset --size 50
+python -m eval.datagen.build_split_candidates
+python -m eval.datagen.merge_golden
+python -m eval.datagen.fill_reference
 ```
 
 **变体矩阵**（`compare.VARIANTS`）：`baseline(全单轮)` / `+probe` / `+probe+split` / `全开`，每个是一组决策 flag 的 on-off。

@@ -8,8 +8,8 @@ import argparse
 import asyncio
 import os
 
-from eval.metrics import METRIC_NAMES, MetricSpec
-from eval.sut import RagOutput, RagSystem
+from eval.harness.metrics import METRIC_NAMES, MetricSpec
+from eval.harness.sut import RagOutput, RagSystem
 
 
 def load_testset(path: str) -> list[dict]:
@@ -97,8 +97,8 @@ async def _run(testset_path: str, limit: int | None) -> dict:
     from ragas.backends import LocalCSVBackend
 
     from eval.config import CHROMA_DIR, RESULTS_DIR, make_eval_embeddings, make_eval_llm
-    from eval.metrics import build_metric_specs
-    from eval.sut import DocQueryWorkflowSystem
+    from eval.harness.metrics import build_metric_specs
+    from eval.harness.sut import DocQueryWorkflowSystem
     from configs.embedding import configure_embedding
     from configs.llm import configure_llm
     from core.rag.data_loader import RAGIndexManager

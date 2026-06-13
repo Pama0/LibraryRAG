@@ -1,4 +1,4 @@
-from eval.sut import map_doc_result, RagOutput
+from eval.harness.sut import map_doc_result, RagOutput
 
 
 class _Node:

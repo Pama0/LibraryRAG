@@ -1,5 +1,5 @@
 """对比表渲染纯逻辑单测（render_delta_table）。"""
-from eval.compare import render_delta_table
+from eval.harness.compare import render_delta_table
 
 
 def test_render_delta_table_marks_improvement():

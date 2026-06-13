@@ -2,7 +2,7 @@
 
 走"复用已切块"路线：把 chroma 片段包成 LangChain Document，喂 generate_with_chunks。
 产出 dataset/testset.draft.jsonl，人工校验后另存为 testset.jsonl 供 run_eval 使用。
-运行（项目根目录）：python -m eval.generate_testset --size 50
+运行（项目根目录）：python -m eval.datagen.generate_testset --size 50
 """
 import argparse
 import asyncio

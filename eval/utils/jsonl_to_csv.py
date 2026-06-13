@@ -1,8 +1,8 @@
 """把 testset JSONL 转成 CSV，方便人工查看与标注。
 
 用法：
-    python -m eval.jsonl_to_csv eval/dataset/testset.draft.jsonl
-    python -m eval.jsonl_to_csv eval/dataset/testset.draft.jsonl -o eval/dataset/testset.draft.csv
+    python -m eval.utils.jsonl_to_csv eval/dataset/testset.draft.jsonl
+    python -m eval.utils.jsonl_to_csv eval/dataset/testset.draft.jsonl -o eval/dataset/testset.draft.csv
 
 输出列顺序为便于标注设计：先放空的 `category`/`scope` 让你边看边填，
 再放 user_input / reference 等只读参考列。CSV 用 utf-8-sig（带 BOM），

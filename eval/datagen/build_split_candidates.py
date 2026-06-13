@@ -11,7 +11,7 @@
 
 产出：dataset/split_candidates.jsonl + 控制台表格。人工抽检 ⚠ 不一致 / borderline 后并入 golden。
 
-运行：python -m eval.build_split_candidates
+运行：python -m eval.datagen.build_split_candidates
 """
 import asyncio
 import json

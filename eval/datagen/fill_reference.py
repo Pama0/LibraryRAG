@@ -13,7 +13,7 @@
 
 安全起见写到 golden.with_ref.jsonl（不覆盖原文件）；人工抽检后再替换 golden.jsonl。
 
-运行：python -m eval.fill_reference
+运行：python -m eval.datagen.fill_reference
 """
 import asyncio
 import json

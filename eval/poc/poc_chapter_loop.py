@@ -5,7 +5,7 @@
 
 锚定"横切主题"的整章（如第6章 索引），其内容在全库分散，召回天然离散 → 期望 pending_split。
 
-运行：python -m eval.poc_chapter_loop
+运行：python -m eval.poc.poc_chapter_loop
 """
 import asyncio
 import json

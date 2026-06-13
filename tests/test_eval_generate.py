@@ -1,4 +1,4 @@
-from eval.generate_testset import chunks_to_langchain, filter_by_book, sample_chunks
+from eval.datagen.generate_testset import chunks_to_langchain, filter_by_book, sample_chunks
 
 
 def test_chunks_to_langchain_wraps_text_and_metadata():

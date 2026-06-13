@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 
-from eval.metrics import MetricSpec
-from eval.run_eval import aggregate, score_row, _row_to_dict
-from eval.sut import RagOutput
+from eval.harness.metrics import MetricSpec
+from eval.harness.run_eval import aggregate, score_row, _row_to_dict
+from eval.harness.sut import RagOutput
 
 
 # ── _row_to_dict ──

@@ -3,7 +3,7 @@
 
 对照组放 1 道窄题（应为 retrievable），验证分类器不是"逢题都判 split"。
 
-运行：python -m eval.poc_classify_check
+运行：python -m eval.poc.poc_classify_check
 """
 import asyncio
 

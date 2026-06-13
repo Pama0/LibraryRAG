@@ -5,7 +5,7 @@
   ② 按子节组织正文（保留子主题结构，这是"广"的信号）
   ③ 一次 LLM 调用产出：子主题骨架 + 1~2 道广题 + 多子节参考答案
 
-运行：python -m eval.poc_chapter_summary
+运行：python -m eval.poc.poc_chapter_summary
 """
 import asyncio
 import json

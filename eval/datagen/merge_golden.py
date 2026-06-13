@@ -7,7 +7,7 @@
 输出每行最小档：{user_input, category, scope}（category=构造意图金标准，run_eval 读作
 expected_category 算分类准确率）。同时打印类别配额 + 与 SUT 不一致清单（供人工复核）。
 
-运行：python -m eval.merge_golden
+运行：python -m eval.datagen.merge_golden
 """
 import json
 import os

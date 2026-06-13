@@ -11,7 +11,7 @@
 
 产出：dataset/ambiguous_missing_candidates.jsonl + 控制台表。
 
-运行：python -m eval.build_ambiguous_missing
+运行：python -m eval.datagen.build_ambiguous_missing
 """
 import asyncio
 import json
