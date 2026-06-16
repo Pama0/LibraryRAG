@@ -107,3 +107,64 @@ def test_make_retriever_memoizes_by_name(monkeypatch):
     first = mod.make_retriever("vector")
     second = mod.make_retriever("vector")
     assert first is second
+
+
+# ── HybridRetriever ───────────────────────────────────────────────────
+from core.retrieval.retrieve import HybridRetriever
+
+
+class _FakeChromaCollection:
+    def __init__(self, ids, docs, metas):
+        self._data = {"ids": ids, "documents": docs, "metadatas": metas}
+        self.get_calls = 0
+
+    def get(self, include=None):
+        self.get_calls += 1
+        return self._data
+
+
+class _FakeIMWithCorpus:
+    """dense 走 as_retriever；BM25 语料走 chroma_collection.get。"""
+
+    def __init__(self, dense_nodes, ids, docs, metas):
+        self._index = _FakeIndex(dense_nodes)
+        self.chroma_collection = _FakeChromaCollection(ids, docs, metas)
+
+    def get_index(self):
+        return self._index
+
+
+async def test_hybrid_builds_bm25_once_and_fuses_dense_and_sparse():
+    dense = [_nws("d1"), _nws("d2")]
+    im = _FakeIMWithCorpus(
+        dense_nodes=dense,
+        ids=["d2", "s1", "s2"],
+        docs=["范围查询 扫描", "哈希 等值查询", "事务 隔离性"],
+        metas=[{"book_title": "《A》"}, {"book_title": "《A》"}, {"book_title": "《A》"}],
+    )
+    hr = HybridRetriever()
+
+    out = await hr.retrieve("等值查询", index_manager=im, book_titles=["《A》"], top_k=3)
+    ids = [o.node.node_id for o in out]
+    assert "d1" in ids or "d2" in ids
+    assert all(isinstance(o, NodeWithScore) for o in out)
+    assert len(ids) <= 3
+
+    # 再检索一次：BM25 只构造一次（chroma.get 不再被调）
+    await hr.retrieve("隔离性", index_manager=im, book_titles=["《A》"], top_k=3)
+    assert im.chroma_collection.get_calls == 1
+
+
+async def test_hybrid_bm25_scope_post_filter():
+    """BM25 对全库打分后，按 book_titles 后过滤；scope 外的 node 不应出现在 sparse 侧。"""
+    im = _FakeIMWithCorpus(
+        dense_nodes=[],                       # dense 空，结果只来自 BM25
+        ids=["inA", "inB"],
+        docs=["等值查询 命中", "等值查询 命中"],
+        metas=[{"book_title": "《A》"}, {"book_title": "《B》"}],
+    )
+    hr = HybridRetriever()
+    out = await hr.retrieve("等值查询", index_manager=im, book_titles=["《A》"], top_k=5)
+    ids = [o.node.node_id for o in out]
+    assert "inB" not in ids                   # 《B》被 scope 过滤掉
+    assert ids == ["inA"]
