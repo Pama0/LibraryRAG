@@ -44,6 +44,7 @@ from core.workflow.qa_capability import (  # noqa: F401  (事件类 re-export �
     RetrievalStartEvent,
 )
 from core.agent.qa_agent import QaAgent
+from core.retrieval.rerank import make_reranker
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,7 @@ class DocQueryWorkflow(Workflow):
         llm: LLM,
         similarity_top_k: int = 5,
         max_sub_queries: int = 6,
+        reranker: str | None = None,
         probe_then_classify: bool = True,
         split_enabled: bool = True,
         assume_enabled: bool = True,
@@ -132,7 +134,10 @@ class DocQueryWorkflow(Workflow):
         # 门口 Router（消指代 + 规范化 + 意图分类）与 QA capability（降噪分类 + 检索合成）
         # 各自独立、各自可测。检索/合成实质逻辑全在 qa，本 workflow 只编排 + 委托。
         self.router = IntentRouter(llm)
-        self.qa = QaCapability(index_manager, llm, similarity_top_k, max_sub_queries)
+        self.qa = QaCapability(
+            index_manager, llm, similarity_top_k, max_sub_queries,
+            reranker=make_reranker(reranker),
+        )
         self.qa_agent = QaAgent(index_manager, llm, similarity_top_k, max_iterations=6)
         # 决策开关（评测 ablation 用；off → 对应分支降级单轮 retrieve、probe 关闭）
         self._probe = probe_then_classify

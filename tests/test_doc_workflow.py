@@ -357,3 +357,36 @@ async def test_chitchat_responds_without_retrieval_or_classify():
     assert "知识库助手" in str(result.response)
     assert llm.calls == 1                         # 只有 Router 这一次
 
+
+# ── reranker 名字 → 对象注入 QaCapability（装配单测）──────────────────
+class _StubIndexManager:
+    pass
+
+
+class _StubLLM:
+    pass
+
+
+def test_no_reranker_by_default():
+    wf = DocQueryWorkflow(_StubIndexManager(), _StubLLM())
+    assert wf.qa.reranker is None
+
+
+def test_reranker_name_resolved_and_injected(monkeypatch):
+    sentinel = object()
+    import core.workflow.doc_workflow as mod
+
+    captured = {}
+
+    def fake_make(name):
+        captured["name"] = name
+        return sentinel
+
+    monkeypatch.setattr(mod, "make_reranker", fake_make)
+
+    wf = DocQueryWorkflow(_StubIndexManager(), _StubLLM(),
+                          reranker="bge-reranker-v2-m3")
+
+    assert captured["name"] == "bge-reranker-v2-m3"
+    assert wf.qa.reranker is sentinel
+
