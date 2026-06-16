@@ -155,6 +155,21 @@ async def test_hybrid_builds_bm25_once_and_fuses_dense_and_sparse():
     assert im.chroma_collection.get_calls == 1
 
 
+async def test_hybrid_fuses_sparse_only_node_and_none_scope():
+    """RRF 确实融合两路：dense 没召回但 BM25 命中的节点也进结果；book_titles=None 不过滤。"""
+    im = _FakeIMWithCorpus(
+        dense_nodes=[_nws("d1")],             # dense 只给 d1
+        ids=["d1", "s1"],
+        docs=["平衡树 索引", "等值查询 命中"],
+        metas=[{"book_title": "《A》"}, {"book_title": "《B》"}],
+    )
+    hr = HybridRetriever()
+    out = await hr.retrieve("等值查询", index_manager=im, book_titles=None, top_k=5)
+    ids = [o.node.node_id for o in out]
+    assert "d1" in ids                        # dense 贡献
+    assert "s1" in ids                        # sparse-only 节点经 RRF 融合进入（None=不按 scope 过滤）
+
+
 async def test_hybrid_bm25_scope_post_filter():
     """BM25 对全库打分后，按 book_titles 后过滤；scope 外的 node 不应出现在 sparse 侧。"""
     im = _FakeIMWithCorpus(

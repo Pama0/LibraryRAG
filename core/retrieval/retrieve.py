@@ -121,6 +121,8 @@ class HybridRetriever:
         return nodes, BM25Okapi(corpus)
 
     def _bm25_search(self, query, book_titles, top_k):
+        # 同步打分（O(N) over 全库）：学习项目规模下耗时可忽略，不卸线程；
+        # 只有一次性的 BM25 build（_build_bm25）才走 to_thread。
         scores = self._bm25.get_scores(bm25_tokenize(query))
         order = sorted(range(len(scores)), key=lambda i: -scores[i])
         out = []
