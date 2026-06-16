@@ -355,9 +355,6 @@ def test_format_probe_empty_and_nonempty():
 
 
 # ── rerank 接入 ───────────────────────────────────────────────────────
-from core.workflow.qa_capability import QaCapability as _QaCap
-
-
 class _RecordingReranker:
     """记录入参；把候选倒序后截 top_n（验证顺序确实被改 + 截断）。"""
 
@@ -371,7 +368,7 @@ class _RecordingReranker:
 
 async def test_retrieve_nodes_without_reranker_keeps_top_k():
     im = FakeIndexManager(nodes=["a", "b", "c"])
-    qa = _QaCap(im, FakeLLM(), similarity_top_k=3)
+    qa = QaCapability(im, FakeLLM(), similarity_top_k=3)
 
     nodes = await qa._retrieve_nodes("q", None)
 
@@ -383,8 +380,8 @@ async def test_retrieve_nodes_without_reranker_keeps_top_k():
 async def test_retrieve_nodes_with_reranker_overfetches_then_truncates():
     im = FakeIndexManager(nodes=["a", "b", "c", "d", "e"])
     rr = _RecordingReranker()
-    qa = _QaCap(im, FakeLLM(), similarity_top_k=2,
-                reranker=rr, rerank_candidate_k=5)
+    qa = QaCapability(im, FakeLLM(), similarity_top_k=2,
+                      reranker=rr, rerank_candidate_k=5)
 
     nodes = await qa._retrieve_nodes("B+树", None)
 
