@@ -48,6 +48,9 @@ VARIANTS = {
                          assume_enabled=False, other_agent_enabled=False),
     "全开": dict(probe_then_classify=True, split_enabled=True,
                  assume_enabled=True, other_agent_enabled=True),
+    "全开+rerank": dict(probe_then_classify=True, split_enabled=True,
+                        assume_enabled=True, other_agent_enabled=True,
+                        reranker="bge-reranker-v2-m3"),
 }
 
 
