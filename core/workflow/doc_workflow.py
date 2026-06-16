@@ -123,6 +123,8 @@ class DocQueryWorkflow(Workflow):
         llm: LLM,
         similarity_top_k: int = 5,
         max_sub_queries: int = 6,
+        # 可插拔检索后处理组件（按名字注入；名字→对象在 core 解析，None=基线无重排）。
+        # 与下面的布尔决策开关不同：那是二元开关，这是带多实现的具名组件。
         reranker: str | None = None,
         probe_then_classify: bool = True,
         split_enabled: bool = True,
