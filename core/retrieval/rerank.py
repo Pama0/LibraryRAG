@@ -23,8 +23,9 @@ class BgeReranker:
     def __init__(self, model: str = "BAAI/bge-reranker-v2-m3"):
         from llama_index.core.postprocessor import SentenceTransformerRerank
 
-        # top_n 占位，真实值每次调用前按 top_n 覆盖
-        self._pp = SentenceTransformerRerank(model=model, top_n=5)
+        # 设大 top_n：让 postprocess 返回「全部按分排序」，截断交给本地 _postprocess，
+        # 不再 per-call mutate 共享状态 → 实例可并发复用、无竞态。
+        self._pp = SentenceTransformerRerank(model=model, top_n=10_000)
 
     async def rerank(self, query: str, nodes: list, top_n: int) -> list:
         if not nodes:
@@ -34,8 +35,8 @@ class BgeReranker:
     def _postprocess(self, query: str, nodes: list, top_n: int) -> list:
         from llama_index.core import QueryBundle
 
-        self._pp.top_n = top_n
-        return self._pp.postprocess_nodes(nodes, query_bundle=QueryBundle(query))
+        ranked = self._pp.postprocess_nodes(nodes, query_bundle=QueryBundle(query))
+        return ranked[:top_n]
 
 
 # 名字 → 构造器。新增实现在此登记一行即可。
@@ -43,13 +44,18 @@ _REGISTRY = {
     "bge-reranker-v2-m3": lambda: BgeReranker("BAAI/bge-reranker-v2-m3"),
 }
 
+# 名字 → 已构造实例的缓存（一进程一次模型加载；instance 设计为可并发复用）。
+_INSTANCES: dict = {}
+
 
 def make_reranker(name: str | None) -> "Reranker | None":
-    """名字 → 实例。None/"" → None（跳过这步）；未知名字 → ValueError（配置错误尽早暴露）。"""
+    """名字 → 实例（按名缓存，模型只加载一次）。None/"" → None；未知名字 → ValueError。"""
     if not name:
         return None
     if name not in _REGISTRY:
         raise ValueError(
             f"未知 reranker 名字：{name!r}，可选：{list(_REGISTRY)}"
         )
-    return _REGISTRY[name]()
+    if name not in _INSTANCES:
+        _INSTANCES[name] = _REGISTRY[name]()
+    return _INSTANCES[name]

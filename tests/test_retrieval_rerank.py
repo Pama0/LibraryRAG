@@ -30,3 +30,27 @@ class _FakeReranker:
 
 def test_protocol_runtime_check_accepts_conforming_object():
     assert isinstance(_FakeReranker(), Reranker)
+
+
+def test_make_reranker_caches_instance_per_name(monkeypatch):
+    import core.retrieval.rerank as mod
+
+    created = []
+
+    class _Cheap:
+        async def rerank(self, query, nodes, top_n):
+            return nodes[:top_n]
+
+    def _make_cheap():
+        inst = _Cheap()
+        created.append(inst)
+        return inst
+
+    monkeypatch.setattr(mod, "_REGISTRY", {"cheap": _make_cheap})
+    monkeypatch.setattr(mod, "_INSTANCES", {})  # 隔离缓存，避免污染其他测试
+
+    first = mod.make_reranker("cheap")
+    second = mod.make_reranker("cheap")
+
+    assert first is second           # 同名复用同一实例
+    assert len(created) == 1          # 只构造一次
