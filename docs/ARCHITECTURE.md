@@ -80,6 +80,7 @@ Memory 是整个构想的地基，**最该提前定接口**。要点：
 | `core/workflow/query_preprocess.py` | step1：规范化+指代+降噪+难度分类（一次 LLM call） | **拆分**：通用净化上提 Router，降噪+难度留 QA。见 [拆分 spec](superpowers/specs/2026-06-11-intent-router-and-preprocess-split-design.md) |
 | `core/workflow/doc_workflow.py` | 顶层编排骨架（preprocess→路由→分支 agent→finalize） | **QA capability** 的种子 + Router 雏形 |
 | Chroma + `index_manager` | 文档索引 | Layer 0 检索服务 |
+| `core/retrieval/rerank.py` | 可插拔 Reranker（bge 交叉编码器，注入式）：装配时按名字注入，不传=基线（直召 top_k），传入=过召回后重排截断；eval `VARIANTS` 以名字选择，ablation 量化增益 | Layer 0 检索后处理 |
 | 用户记忆系统 | 未建 | Layer 0，规划中 |
 
 ## 6. 落地路径（增量，不一次造完）
