@@ -330,7 +330,9 @@ class QaCapability:
             nodes = await self.reranker.rerank(query, nodes, self.similarity_top_k)
         return nodes
 
-    async def _retrieve_all(self, sub_queries: list[str], book_titles) -> list[list]:
+    async def _retrieve_all(
+        self, sub_queries: list[str], book_titles: Optional[list[str]]
+    ) -> list[list]:
         """并发扇出检索：对每个子查询各检索一次，返回与入参同序的 node 列表的列表。"""
         sem = asyncio.Semaphore(self._retrieve_concurrency)
 

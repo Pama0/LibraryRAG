@@ -522,6 +522,23 @@ async def test_split_synthesize_dedupes_overlapping_nodes():
     assert [n.node_id for n in synth_nodes] == ["dup", "x"]   # 按 node_id 去重，保序
 
 
+async def test_split_synthesize_without_reranker_sorts_pool_by_score_desc():
+    # 合并序 [low, high]，无 reranker → 应按 score 降序重排为 [high, low]
+    low, high = _IdNode("low", score=0.2), _IdNode("high", score=0.9)
+    qa = _synth_qa({"locate": [low], "qa": [low], "qb": [high]})
+    assert qa.reranker is None
+
+    async def fake_decompose(clean_query, headings, passages, max_items):
+        return ["qa", "qb"], "synthesize"
+
+    qa.decomposer.run = fake_decompose
+    ctx = FakeCtx()
+
+    await qa.split(ctx, "locate", ["书"])
+    _q, synth_nodes = qa._synth_calls[0]
+    assert [n.node_id for n in synth_nodes] == ["high", "low"]
+
+
 async def test_split_synthesize_emits_single_retrieval_done():
     qa = _synth_qa({"locate": [_IdNode("1")], "qa": [_IdNode("1")], "qb": [_IdNode("2")]})
 
