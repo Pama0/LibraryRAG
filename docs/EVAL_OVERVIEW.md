@@ -47,7 +47,8 @@
 | `retrievable` | 单一概念、单轮能命中 | `retrieve()` 单轮检索合成 | （基础） |
 | `pending_split` | 多实体/大主题、需罗列子项 | `split()` 拆解→逐项检索→汇总 | `split_enabled` |
 | `ambiguous` | 话题具体但缺评判维度 | `assume()` 归纳维度→分节作答 | `assume_enabled` |
-| `missing_info` | 信息不足/指代不明/库外 | 反问澄清 clarify | （基础） |
+| `missing_info` | 信息不足/指代不明（库里有该主题但缺限定） | 反问澄清 clarify | （基础） |
+| `out_of_scope` | 库外：问题清晰但库里没有该主题 | 固定话术告知，不检索/不反问 | （基础） |
 | `other` | 跨主题综合/多步推理 | other agent（高难度） | `other_agent_enabled` |
 
 **probe（探测检索）** 是横切开关 `probe_then_classify`：开启时 judge 拿"探测召回信号"判 category（更准但偏向 retrievable）；关闭时纯文本判。
@@ -95,7 +96,8 @@
 | pending_split | 3 | 跨章多实体·列举式 |
 | other | 3 | 跨章多实体·综合式 |
 | ambiguous | 5 | 在库概念+缺维度问法 |
-| missing_info | 8 | 悬空指代(4) + 库外(4) |
+| missing_info | 4 | 悬空指代 |
+| out_of_scope | 4 | 库外（PostgreSQL/MongoDB/Oracle/Cassandra） |
 
 ---
 
@@ -173,7 +175,7 @@ python -m eval.datagen.fill_reference
 
 ## 8. 当前已知问题（评测发现的真实弱点）
 
-1. **库外问题误判 retrievable**：PostgreSQL/MongoDB 等两本书没有的题，judge 判成 retrievable（应 missing_info）。根因：检索器永远返回 top-k（即便跑题），judge 对 missing_info 过度保守，**缺召回相关性门控**。probe 开/关都犯，不是 probe 独有。
+1. **库外问题误判 retrievable —— 已修（2026-06-17）**：曾因检索器永远返回 top-k（即便跑题）、judge 缺召回相关性门控，PostgreSQL/MongoDB 等库外题被判 retrievable。已新增独立 `out_of_scope` 分类（判据锚定召回片段与问题主体实体的相关性），与 `missing_info`（信息不足→反问）解耦。详见 `docs/superpowers/specs/2026-06-17-out-of-scope-classification-design.md`。
 2. **probe 偏向 retrievable**：probe 提供召回证据会把 judge 推向 retrievable，利于 faithfulness 接地，但对边界 ambiguous 题有害（实测把"自适应哈希索引好用吗"从 ambiguous 翻成 retrievable）。
 3. **当前 golden 集对 probe 不公平**：全是 MySQL（judge 本就认识）+ 概念重叠的 OOB，**缺 probe 该救的"在库不认识专名"样本**（如 OpenClaw 书的 SOUL.md/Cron）。导致首张全量表里 +probe 分类准确率不升反降（0.70→0.61），**不能据此判 probe 没用**。
 
@@ -188,7 +190,7 @@ python -m eval.datagen.fill_reference
 - [ ] golden 扩到 30~50 条，补措辞变体，做 OpenClaw 平行样本。
 - [ ] 报告改看**分类别准确率**，而非被 missing_info 拖累的总分。
 - [ ] 给 golden 的非 missing_info 条目补 `reference`，激活 context_recall/factual_correctness。
-- [ ] 修库外 bug：probe/judge 加召回相关性门控。
+- [x] 修库外 bug：已新增 `out_of_scope` 分类（召回相关性按主体实体判定）。
 
 ---
 
