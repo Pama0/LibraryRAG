@@ -5,6 +5,8 @@
 """
 import argparse
 import asyncio
+import os
+from datetime import datetime
 
 # 对比表展示的列（确定性指标——分类准确率——优先，最适合归因决策）
 _COLS = [
@@ -98,10 +100,24 @@ _DETAIL_COLS = [
 ]
 
 
+_RESULT_DIR = os.path.join("eval", "results")
+
+
+def default_result_paths(now: "datetime | None" = None) -> tuple[str, str]:
+    """缺省落盘路径：eval/results/compare_<时间戳>.{md,_detail.csv}。
+
+    文件名带秒级时间戳 → 每次运行不覆盖上一次（md 对比表 + csv 明细同戳配对）。
+    """
+    stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    return (
+        os.path.join(_RESULT_DIR, f"compare_{stamp}.md"),
+        os.path.join(_RESULT_DIR, f"compare_{stamp}_detail.csv"),
+    )
+
+
 def write_detail_csv(detail: list[dict], path: str) -> None:
     """每条明细写 CSV（utf-8-sig，Excel 直开）。match=金标准 vs SUT 实判是否一致。"""
     import csv
-    import os
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=_DETAIL_COLS, extrasaction="ignore")
@@ -120,24 +136,28 @@ def main():
                    help=f"变体名子集，可选：{list(VARIANTS.keys())}")
     p.add_argument("--baseline", default="baseline(全单轮)", help="作为 delta 基准的变体名")
     p.add_argument("--out", default=None,
-                   help="把对比表存为 UTF-8 Markdown 文件（如 docs/compare_golden.md）；缺省只打印")
+                   help="对比表 Markdown 落盘路径；缺省 eval/results/compare_<时间戳>.md")
     p.add_argument("--detail", default=None,
-                   help="把【每条明细】（问题/金标准/SUT判/参考答案/SUT答案/各指标）存为 CSV")
+                   help="每条明细 CSV 落盘路径；缺省 eval/results/compare_<时间戳>_detail.csv")
     args = p.parse_args()
     variants, detail = asyncio.run(_run_variants(args.testset, args.limit, args.variants))
     table = render_delta_table(variants, baseline=args.baseline)
     print(table)
-    if args.out:
-        import os
-        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-        with open(args.out, "w", encoding="utf-8") as f:
-            f.write(f"# 决策对比（baseline={args.baseline}）\n\n")
-            f.write(f"测试集：`{args.testset}`" + (f"（前 {args.limit} 条）" if args.limit else "") + "\n\n")
-            f.write(table + "\n")
-        print(f"\n[已存] {args.out}")
-    if args.detail:
-        write_detail_csv(detail, args.detail)
-        print(f"[已存明细] {args.detail}（共 {len(detail)} 行 = 条数 × 变体数）")
+
+    # 缺省即落盘到 eval/results（带时间戳防覆盖）；--out/--detail 可显式改路径
+    default_md, default_csv = default_result_paths()
+    out_path = args.out or default_md
+    detail_path = args.detail or default_csv
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(f"# 决策对比（baseline={args.baseline}）\n\n")
+        f.write(f"测试集：`{args.testset}`" + (f"（前 {args.limit} 条）" if args.limit else "") + "\n\n")
+        f.write(table + "\n")
+    print(f"\n[已存] {out_path}")
+
+    write_detail_csv(detail, detail_path)
+    print(f"[已存明细] {detail_path}（共 {len(detail)} 行 = 条数 × 变体数）")
 
 
 if __name__ == "__main__":
