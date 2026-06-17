@@ -17,12 +17,8 @@ from typing import Optional
 from llama_index.core.agent.workflow import FunctionAgent
 from llama_index.core.llms import LLM
 from llama_index.core.tools import FunctionTool
-from llama_index.core.vector_stores import (
-    FilterOperator,
-    MetadataFilter,
-    MetadataFilters,
-)
 
+from core.retrieval.retrieve import build_book_filters
 from core.workflow.qa_capability import (
     AnswerDeltaEvent,
     RetrievalDoneEvent,
@@ -77,17 +73,6 @@ class QaAgent:
             )
         return self.agent
 
-    def _make_filters(self, book_titles: Optional[list[str]]):
-        if not book_titles:
-            return None
-        return MetadataFilters(filters=[
-            MetadataFilter(
-                key="book_title",
-                operator=FilterOperator.IN,
-                value=list(book_titles),
-            ),
-        ])
-
     async def _search(self, query: str) -> str:
         """检索器主体：按 query 取 top-k 原文片段并收集 nodes。供 book_search 工具调用。"""
         if not isinstance(query, str):
@@ -100,7 +85,7 @@ class QaAgent:
             return "知识库为空，请先上传 PDF。"
         retriever = index.as_retriever(
             similarity_top_k=self.similarity_top_k,
-            filters=self._make_filters(self._run_scope),
+            filters=build_book_filters(self._run_scope),
         )
         nodes = await retriever.aretrieve(query)
         if not nodes:

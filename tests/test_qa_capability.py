@@ -390,3 +390,42 @@ async def test_retrieve_nodes_with_reranker_overfetches_then_truncates():
     # reranker 收到候选并按 top_n 截断
     assert rr.calls == [("B+树", ["a", "b", "c", "d", "e"], 2)]
     assert nodes == ["e", "d"]  # 倒序后截 2
+
+
+# ── retriever 接入 ────────────────────────────────────────────────────
+class _RecordingRetriever:
+    def __init__(self, nodes):
+        self._nodes = nodes
+        self.calls = []
+
+    async def retrieve(self, query, *, index_manager, book_titles, top_k):
+        self.calls.append((query, book_titles, top_k))
+        return self._nodes
+
+
+async def test_retrieve_nodes_delegates_to_injected_retriever():
+    rr = _RecordingRetriever(nodes=["x", "y"])
+    qa = QaCapability(FakeIndexManager(nodes=[]), FakeLLM(),
+                      similarity_top_k=4, retriever=rr)
+
+    nodes = await qa._retrieve_nodes("B+树", ["《A》"])
+
+    assert nodes == ["x", "y"]
+    assert rr.calls == [("B+树", ["《A》"], 4)]   # 无 reranker → top_k=similarity_top_k
+
+
+async def test_retrieve_nodes_default_retriever_is_vector():
+    from core.retrieval.retrieve import VectorRetriever
+    qa = QaCapability(FakeIndexManager(nodes=[]), FakeLLM())
+    assert isinstance(qa.retriever, VectorRetriever)
+
+
+async def test_retrieve_nodes_retriever_overfetches_when_reranker_set():
+    rr_ret = _RecordingRetriever(nodes=["a", "b", "c", "d", "e"])
+    qa = QaCapability(FakeIndexManager(nodes=[]), FakeLLM(),
+                      similarity_top_k=2, retriever=rr_ret,
+                      reranker=_RecordingReranker(), rerank_candidate_k=5)
+
+    await qa._retrieve_nodes("q", None)
+    # retriever 拿候选池大小 5（reranker 再截 2）
+    assert rr_ret.calls[0][2] == 5

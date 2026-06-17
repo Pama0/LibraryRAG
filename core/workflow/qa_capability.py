@@ -23,14 +23,10 @@ from typing import Optional
 
 from llama_index.core import get_response_synthesizer
 from llama_index.core.llms import LLM
-from llama_index.core.vector_stores import (
-    FilterOperator,
-    MetadataFilter,
-    MetadataFilters,
-)
 from llama_index.core.workflow import Context, Event
 
 from core.retrieval.rerank import Reranker
+from core.retrieval.retrieve import Retriever, VectorRetriever
 from core.workflow.chapter_tree import children, dominant_prefix, unique_chapters
 from core.workflow.query_decompose import QueryDecomposer
 from core.workflow.query_dimension import DimensionExtractor
@@ -69,6 +65,7 @@ class QaCapability:
         max_sub_queries: int = 6,
         reranker: "Reranker | None" = None,
         rerank_candidate_k: int = 20,
+        retriever: "Retriever | None" = None,
     ):
         self.index_manager = index_manager
         self.llm = llm
@@ -76,6 +73,8 @@ class QaCapability:
         self.max_sub_queries = max_sub_queries
         self.reranker = reranker
         self.rerank_candidate_k = rerank_candidate_k
+        # 检索不可跳过，基线=具体 VectorRetriever（不传即基线）
+        self.retriever = retriever or VectorRetriever()
         self.preprocessor = QueryPreprocessor(llm)
         self.decomposer = QueryDecomposer(llm)
         self.dimensioner = DimensionExtractor(llm)
@@ -273,27 +272,13 @@ class QaCapability:
         metas = data.get("metadatas") or []
         return unique_chapters(metas, book_titles[0])
 
-    def _make_filters(self, book_titles: Optional[list[str]]):
-        """scope 硬约束转 metadata 过滤器；空范围返回 None（全库）。"""
-        if not book_titles:
-            return None
-        return MetadataFilters(filters=[
-            MetadataFilter(
-                key="book_title",
-                operator=FilterOperator.IN,
-                value=list(book_titles),
-            ),
-        ])
-
     async def _retrieve_nodes(self, query: str, book_titles: Optional[list[str]]):
-        # 无 reranker（基线）→ 直接召回 top_k；有 → 过召回到候选池再重排截回 top_k
+        # 检索策略可插拔（默认 VectorRetriever=基线）；有 reranker 时过召回候选池再重排截断
         fetch_k = self.rerank_candidate_k if self.reranker else self.similarity_top_k
-        index = self.index_manager.get_index()
-        retriever = index.as_retriever(
-            similarity_top_k=fetch_k,
-            filters=self._make_filters(book_titles),
+        nodes = await self.retriever.retrieve(
+            query, index_manager=self.index_manager,
+            book_titles=book_titles, top_k=fetch_k,
         )
-        nodes = await retriever.aretrieve(query)
         if self.reranker:
             nodes = await self.reranker.rerank(query, nodes, self.similarity_top_k)
         return nodes
