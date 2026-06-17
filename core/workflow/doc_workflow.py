@@ -63,6 +63,10 @@ class ChitchatEvent(Event):
     """intent=chitchat → 寒暄/闲聊，门口直接友好回应，不进检索。"""
 
 
+class OutOfScopeEvent(Event):
+    """out_of_scope → 库外问题（探测召回片段与主题无关）。如实告知，不检索/不反问。"""
+
+
 class PreprocessEvent(Event):
     """intent=qa → QA 内部预处理（降噪 + 难度分类）。纯信号；clean_query 从 ctx 取。"""
 
@@ -187,7 +191,7 @@ class DocQueryWorkflow(Workflow):
     @step
     async def preprocess(
         self, ctx: Context, ev: PreprocessEvent
-    ) -> "RetrieveAgentEvent | SplitEvent | AssumeEvent | ClarifyEvent | OtherEvent":
+    ) -> "RetrieveAgentEvent | SplitEvent | AssumeEvent | ClarifyEvent | OtherEvent | OutOfScopeEvent":
         clean_query = await ctx.store.get("clean_query")
         book_titles = await ctx.store.get("book_titles")
 
@@ -198,6 +202,8 @@ class DocQueryWorkflow(Workflow):
 
         rewritten = result.rewritten_query
         match result.category:
+            case "out_of_scope":
+                return OutOfScopeEvent()
             case "pending_split":
                 return SplitEvent(rewritten_query=rewritten, split_reason=result.reason)
             case "ambiguous":
@@ -236,6 +242,13 @@ class DocQueryWorkflow(Workflow):
         return FinalizeEvent(
             answer="你好！我是文档知识库助手，可以问我已入库书籍/文档里的内容～",
             source_nodes=[],
+        )
+
+    @step
+    async def out_of_scope_branch(self, ctx: Context, ev: OutOfScopeEvent) -> FinalizeEvent:
+        # 库外：探测召回片段与问题主题无关 → 如实告知，不检索/不合成/不反问。
+        return FinalizeEvent(
+            answer="知识库里暂无与该问题相关的内容。", source_nodes=[]
         )
 
     @step

@@ -358,6 +358,29 @@ async def test_chitchat_responds_without_retrieval_or_classify():
     assert llm.calls == 1                         # 只有 Router 这一次
 
 
+async def test_out_of_scope_responds_without_retrieval_or_clarify():
+    # 库外问题（PostgreSQL）→ out_of_scope → 固定话术，不检索/不反问
+    llm = FakeLLM([
+        '{"intent": "qa", "clean_query": "PostgreSQL的MVCC是怎么实现的"}',
+        '{"category": "out_of_scope", "rewritten_query": "PostgreSQL的MVCC是怎么实现的", "reason": "库外，召回片段均不相关"}',
+    ])
+    wf = _wf(llm)
+
+    called = {"retrieve": False}
+
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
+        called["retrieve"] = True
+        return "不应被调用", []
+
+    wf.qa.retrieve = fake_retrieve
+
+    result = await wf.run(query="PostgreSQL的MVCC是怎么实现的", memory=FakeMemory())
+    assert called["retrieve"] is False                 # 库外不检索
+    assert "知识库里暂无" in str(result.response)        # 固定话术
+    assert result.source_nodes == []
+    assert result.metadata.get("category") == "out_of_scope"  # 分类回流 metadata
+
+
 # ── reranker 名字 → 对象注入 QaCapability（装配单测）──────────────────
 class _StubIndexManager:
     pass
