@@ -51,6 +51,12 @@ VARIANTS = {
     "全开+rerank": dict(probe_then_classify=True, split_enabled=True,
                         assume_enabled=True, other_agent_enabled=True,
                         reranker="bge-reranker-v2-m3"),
+    "全开+hybrid": dict(probe_then_classify=True, split_enabled=True,
+                        assume_enabled=True, other_agent_enabled=True,
+                        retriever="hybrid"),
+    "全开+hybrid+rerank": dict(probe_then_classify=True, split_enabled=True,
+                               assume_enabled=True, other_agent_enabled=True,
+                               retriever="hybrid", reranker="bge-reranker-v2-m3"),
 }
 
 

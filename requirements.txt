@@ -10,6 +10,8 @@ llama-index-postprocessor-cohere-rerank
 llama-index-tools-tavily-research
 llama-index-workflows
 sentence-transformers  # bge 交叉编码器 reranker 后端（core/retrieval/rerank.py）
+rank-bm25  # HybridRetriever 的 BM25 稀疏检索后端（纯 Python，core/retrieval/retrieve.py）
+jieba  # HybridRetriever 的中文分词（纯 Python，BM25 tokenizer）
 
 # 向量数据库
 chromadb
