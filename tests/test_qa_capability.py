@@ -450,3 +450,117 @@ async def test_retrieve_all_runs_concurrently_and_preserves_order():
     qa._retrieve_nodes = fake_rn
     out = await asyncio.wait_for(qa._retrieve_all(["a", "b"], None), timeout=1.0)
     assert out == [["a"], ["b"]]   # gather 保持入参顺序
+
+
+# ── split：synthesize 模式（扇出 → 去重合并 → 对原始问题单次整合合成）──
+class _IdNode:
+    metadata = {"chapter": ""}
+
+    def __init__(self, nid, content="正文", score=1.0):
+        self.node_id = nid
+        self._c = content
+        self.score = score
+
+    def get_content(self):
+        return self._c
+
+
+def _synth_qa(retrieve_map):
+    """retrieve_map: {子查询: [节点...]}；记录 _synthesize_stream 的调用。"""
+    qa = _qa()
+    qa._book_chapters = lambda book_titles: []
+
+    async def fake_retrieve_nodes(query, book_titles):
+        return retrieve_map.get(query, [])
+
+    qa._retrieve_nodes = fake_retrieve_nodes
+
+    calls = []
+
+    async def fake_synth(ctx, query, nodes):
+        calls.append((query, list(nodes)))
+        return f"[整合:{query}]"
+
+    qa._synthesize_stream = fake_synth
+    qa._synth_calls = calls
+    return qa
+
+
+async def test_split_synthesize_single_synthesis_over_merged_pool():
+    a, b = _IdNode("1"), _IdNode("2")
+    qa = _synth_qa({"locate": [a], "子查询A": [a], "子查询B": [b]})
+
+    async def fake_decompose(clean_query, headings, passages, max_items):
+        return ["子查询A", "子查询B"], "synthesize"
+
+    qa.decomposer.run = fake_decompose
+    ctx = FakeCtx()  # 定位整句检索走 retrieve_map["locate"]=[a]
+
+    answer, nodes = await qa.split(ctx, "locate", ["书"])
+
+    # 只合成一次，且用原始问题、池含两子查询去重后的节点
+    assert len(qa._synth_calls) == 1
+    synth_query, synth_nodes = qa._synth_calls[0]
+    assert synth_query == "locate"
+    assert {n.node_id for n in synth_nodes} == {"1", "2"}
+    assert "##" not in answer            # 单段连贯，无分节标题
+    assert answer == "[整合:locate]"
+
+
+async def test_split_synthesize_dedupes_overlapping_nodes():
+    shared = _IdNode("dup")
+    qa = _synth_qa({"locate": [shared], "qa": [shared], "qb": [shared, _IdNode("x")]})
+
+    async def fake_decompose(clean_query, headings, passages, max_items):
+        return ["qa", "qb"], "synthesize"
+
+    qa.decomposer.run = fake_decompose
+    ctx = FakeCtx()
+
+    await qa.split(ctx, "locate", ["书"])
+    _q, synth_nodes = qa._synth_calls[0]
+    assert [n.node_id for n in synth_nodes] == ["dup", "x"]   # 按 node_id 去重，保序
+
+
+async def test_split_synthesize_emits_single_retrieval_done():
+    qa = _synth_qa({"locate": [_IdNode("1")], "qa": [_IdNode("1")], "qb": [_IdNode("2")]})
+
+    async def fake_decompose(clean_query, headings, passages, max_items):
+        return ["qa", "qb"], "synthesize"
+
+    qa.decomposer.run = fake_decompose
+    ctx = FakeCtx()
+
+    await qa.split(ctx, "locate", ["书"])
+    names = [e.__class__.__name__ for e in ctx.events]
+    assert names.count("RetrievalDoneEvent") == 1
+
+
+async def test_split_synthesize_empty_pool_returns_scope_hint():
+    qa = _synth_qa({"locate": [_IdNode("1")], "qa": [], "qb": []})
+
+    async def fake_decompose(clean_query, headings, passages, max_items):
+        return ["qa", "qb"], "synthesize"
+
+    qa.decomposer.run = fake_decompose
+    ctx = FakeCtx()
+
+    answer, nodes = await qa.split(ctx, "locate", ["某本书"])
+    assert nodes == []
+    assert "某本书" in answer and "没有检索到" in answer
+
+
+async def test_split_synthesize_single_subquery_degrades_to_single():
+    only = _IdNode("only")
+    qa = _synth_qa({"locate": [only], "唯一子查询": [only]})
+
+    async def fake_decompose(clean_query, headings, passages, max_items):
+        return ["唯一子查询"], "synthesize"
+
+    qa.decomposer.run = fake_decompose
+    ctx = FakeCtx()
+
+    answer, nodes = await qa.split(ctx, "locate", ["书"])
+    assert len(qa._synth_calls) == 1
+    assert qa._synth_calls[0][0] == "locate"   # 仍对原始问题单次合成
+    assert "##" not in answer
