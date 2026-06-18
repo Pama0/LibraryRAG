@@ -53,6 +53,13 @@
 
 **probe（探测检索）** 是横切开关 `probe_then_classify`：开启时 judge 拿"探测召回信号"判 category（更准但偏向 retrievable）；关闭时纯文本判。
 
+### Layer 0 替代 · agent 自主规划路线（对照系）
+除上面的 `DocQueryWorkflow`，评测另有第二被测系统 `eval/harness/sut.py` 的
+`AgentSystem`：**绕过 IntentRouter + category 分类**，每条 query 直接喂给有界
+`QaAgent`（FunctionAgent + book_search/list_books，自主多轮规划检索）。它**不产
+category**，故分类准确率列显示「—」，只在 5 个 ragas 答案质量指标上与 workflow 同台对比。
+用途：回答「显式决策路由 vs 让 agent 自己规划」到底谁强。
+
 ---
 
 ## 3. 评测指标
@@ -155,6 +162,9 @@ python -m eval.harness.compare --testset eval/dataset/golden.jsonl --variants "b
 
 # 逐步加决策
 python -m eval.harness.compare --testset eval/dataset/golden.jsonl --variants "baseline(全单轮)" "+probe" "+probe+split" "全开"
+
+# 对照：workflow 全开 vs agent 自主规划（同表，agent 行分类准确率列为 —）
+python -m eval.harness.compare --testset eval/dataset/golden.jsonl --variants "全开" "agent(自主规划)"
 
 # 其它入口：生成测试集 / 造金标准 / 补 reference
 python -m eval.datagen.generate_testset --size 50
