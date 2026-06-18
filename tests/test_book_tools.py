@@ -48,8 +48,10 @@ class FakeIndexManager:
 
 
 class _Node:
-    def __init__(self, content):
+    def __init__(self, content, node_id=None, metadata=None):
         self._c = content
+        self.node_id = node_id
+        self.metadata = metadata or {}
 
     def get_content(self):
         return self._c
@@ -147,6 +149,40 @@ async def test_book_search_overfetches_then_reranks_to_top_k():
     assert rer.calls[0]["top_n"] == 5     # 重排截断到最终 top_k
     assert len(ctx.sources) == 5
     assert "片段0" in out
+
+
+async def test_book_search_dedups_sources_by_node_id_across_calls():
+    ctx = _ctx(nodes=[])
+    ctx.reranker = None
+    ctx.retriever = _RecordingRetriever([_Node("X", node_id="a"), _Node("Y", node_id="b")])
+    await BookSearchTool(ctx)("q1")
+    # 第二次召回含已见过的 a（重复），应不再追加
+    ctx.retriever = _RecordingRetriever([_Node("X", node_id="a")])
+    await BookSearchTool(ctx)("q2")
+    assert len(ctx.sources) == 2  # a、b 各一次，q2 的重复 a 被去掉
+
+
+async def test_book_search_prefixes_source_metadata():
+    n = _Node("正文内容", node_id="x", metadata={
+        "book_title": "MySQL核心技术", "chapter": "事务", "page_start": 45, "page_end": 46,
+    })
+    ctx = _ctx(nodes=[])
+    ctx.reranker = None
+    ctx.retriever = _RecordingRetriever([n])
+    out = await BookSearchTool(ctx)("q")
+    assert "《MySQL核心技术》" in out
+    assert "事务" in out
+    assert "p.45-46" in out
+    assert "正文内容" in out
+
+
+async def test_book_search_returns_full_chunk_no_500_truncation():
+    long_text = "甲" * 800
+    ctx = _ctx(nodes=[])
+    ctx.reranker = None
+    ctx.retriever = _RecordingRetriever([_Node(long_text, node_id="x")])
+    out = await BookSearchTool(ctx)("q")
+    assert long_text in out  # 全文返回，未被 500 截断
 
 
 async def test_book_search_no_reranker_fetches_top_k_only():
