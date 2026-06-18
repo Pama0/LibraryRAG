@@ -174,6 +174,38 @@ async def test_book_search_short_circuits_repeated_query():
     assert "片段" in out1
 
 
+async def test_book_search_book_param_narrows_to_one_book():
+    retr = _RecordingRetriever([_Node("x", node_id="a")])
+    ctx = _ctx(nodes=[])
+    ctx.reranker = None
+    ctx.retriever = retr
+    ctx.scope = ["A书", "B书"]
+    await BookSearchTool(ctx)("q", book="A书")
+    assert retr.calls[0]["book_titles"] == ["A书"]   # 这次检索定向到 A书
+
+
+async def test_book_search_book_out_of_scope_rejected():
+    retr = _RecordingRetriever([_Node("x", node_id="a")])
+    ctx = _ctx(nodes=[])
+    ctx.reranker = None
+    ctx.retriever = retr
+    ctx.scope = ["A书"]
+    out = await BookSearchTool(ctx)("q", book="C书")
+    assert "可选" in out                              # 越权给出可选范围提示
+    assert len(retr.calls) == 0                       # 不放行检索
+
+
+async def test_book_search_same_query_diff_book_not_deduped():
+    retr = _RecordingRetriever([_Node("x", node_id="a")])
+    ctx = _ctx(nodes=[])
+    ctx.reranker = None
+    ctx.retriever = retr
+    ctx.scope = ["A书", "B书"]
+    await BookSearchTool(ctx)("q", book="A书")
+    await BookSearchTool(ctx)("q", book="B书")
+    assert len(retr.calls) == 2                        # 同 query 不同 book 不算重复
+
+
 async def test_book_search_distinct_queries_each_retrieve():
     retr = _RecordingRetriever([_Node("x", node_id="a")])
     ctx = _ctx(nodes=[])
@@ -223,21 +255,21 @@ def test_assemble_tools_default_returns_both_and_numbered_prompt():
     tools, prompt = assemble_tools(_ctx())
     assert sorted(t.metadata.name for t in tools) == ["book_search", "list_books"]
     assert "1. " in prompt and "2. " in prompt
-    assert "book_search(query)" in prompt
+    assert "book_search(query, book=None)" in prompt
     assert "list_books()" in prompt
 
 
 def test_assemble_tools_subset_only_selected():
     tools, prompt = assemble_tools(_ctx(), ["book_search"])
     assert [t.metadata.name for t in tools] == ["book_search"]
-    assert "book_search(query)" in prompt
+    assert "book_search(query, book=None)" in prompt
     assert "list_books" not in prompt
 
 
 def test_assemble_tools_usage_override_replaces_default():
     _, prompt = assemble_tools(_ctx(), [ToolSpec("book_search", usage="自定义X")])
     assert "自定义X" in prompt
-    assert "book_search(query)" not in prompt
+    assert "book_search(query, book=None)" not in prompt
 
 
 def test_assemble_tools_unknown_name_raises():

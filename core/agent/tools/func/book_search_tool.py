@@ -1,3 +1,5 @@
+from typing import Optional
+
 from llama_index.core.tools import FunctionTool
 
 from core.agent.tools import register_tool, ToolContext
@@ -42,13 +44,13 @@ class BookSearchTool:
     """
 
     name = "book_search"
-    description = "书籍知识库检索：按 query 返回相关原文片段，范围由用户选定。"
-    prompt_usage = "book_search(query) — 在书籍知识库检索，返回相关原文片段。检索范围已由用户选定，你无需也无法指定书名，只管传好 query。"
+    description = "书籍知识库检索：按 query 返回相关原文片段，范围由用户选定；可选 book 把这次检索定向到其中某一本。"
+    prompt_usage = "book_search(query, book=None) — 在书籍知识库检索，返回相关原文片段。检索范围已由用户选定；默认在全部所选书内搜，跨书对比或单书深挖时可传 book=书名把这一次检索定向到其中某一本。"
 
     def __init__(self, ctx: ToolContext):
         self.ctx = ctx
 
-    async def __call__(self, query: str) -> str:
+    async def __call__(self, query: str, book: Optional[str] = None) -> str:
         if not isinstance(query, str):
             query = str(query)
         query = query.strip()
@@ -56,8 +58,14 @@ class BookSearchTool:
             return "请提供要检索的问题。"
         if self.ctx.index_manager.get_index() is None:
             return "知识库为空，请先上传 PDF。"
-        # 重复调用保护：同一 query（归一化）本轮检索过就短路，打断空转、推 agent 收敛。
-        key = query.lower()
+        # 定向检索：book 只能收窄到用户已选范围（ctx.scope）内的某一本，不得越权。
+        scope = self.ctx.scope
+        if book:
+            if scope and book not in scope:
+                return f"book={book!r} 超出可检索范围，可选：{scope}；不传 book 则在全部所选范围检索。"
+            scope = [book]
+        # 重复调用保护：同一 (book, query)（归一化）本轮检索过就短路，打断空转、推 agent 收敛。
+        key = (book or "", query.lower())
         if key in self.ctx.searched_queries:
             return "（该查询已检索过，请换关键词/角度，或基于已检索到的片段作答。）"
         self.ctx.searched_queries.add(key)
@@ -65,7 +73,7 @@ class BookSearchTool:
         fetch_k = self.ctx.rerank_candidate_k if reranker else self.ctx.similarity_top_k
         nodes = await self.ctx.retriever.retrieve(
             query, index_manager=self.ctx.index_manager,
-            book_titles=self.ctx.scope, top_k=fetch_k,
+            book_titles=scope, top_k=fetch_k,
         )
         if reranker:
             nodes = await reranker.rerank(query, nodes, self.ctx.similarity_top_k)

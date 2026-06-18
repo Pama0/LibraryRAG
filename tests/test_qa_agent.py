@@ -134,7 +134,7 @@ async def test_run_resets_searched_queries_each_call():
 def test_qa_agent_default_prompt_lists_both_tools():
     qa = QaAgent(FakeIndexManager(nodes=[]), MockLLM())
     agent = qa._ensure_agent()
-    assert "book_search(query)" in agent.system_prompt
+    assert "book_search(query, book=None)" in agent.system_prompt
     assert "list_books()" in agent.system_prompt
 
 
@@ -146,4 +146,4 @@ def test_qa_agent_tool_selection_overrides_usage_in_prompt():
     )
     agent = qa._ensure_agent()
     assert "覆盖语" in agent.system_prompt
-    assert "book_search(query)" not in agent.system_prompt
+    assert "book_search(query, book=None)" not in agent.system_prompt
