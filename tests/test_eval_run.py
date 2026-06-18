@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from eval.harness.metrics import MetricSpec
-from eval.harness.run_eval import aggregate, score_row, _row_to_dict
+from eval.harness.run_eval import aggregate, build_single_report, score_row, _row_to_dict
 from eval.harness.sut import RagOutput
 
 
@@ -125,3 +125,19 @@ def test_aggregate_skips_blank_category_but_keeps_others():
     rep = aggregate(rows)
     assert rep["classification"]["total"] == 1
     assert rep["classification"]["accuracy"] == 1.0
+
+
+# ── build_single_report：单系统 aggregate + 给每条打 variant 标（供 --detail 落盘）──
+def test_build_single_report_tags_variant_and_aggregates():
+    scored = [
+        {"outcome": "answered", "category": "retrievable", "expected_category": "retrievable",
+         "faithfulness": 1.0, "user_input": "Q"},
+        {"outcome": "answered", "category": "other", "expected_category": "retrievable",
+         "faithfulness": 0.5, "user_input": "Q2"},
+    ]
+    report, detail = build_single_report("当前系统", scored)
+    assert report["classification"]["accuracy"] == 0.5      # 1/2 判对
+    assert report["metric_means"]["faithfulness"] == 0.75
+    assert [d["variant"] for d in detail] == ["当前系统", "当前系统"]
+    assert detail[0]["user_input"] == "Q"
+    assert len(detail) == 2

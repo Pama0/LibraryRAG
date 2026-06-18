@@ -1,7 +1,9 @@
-"""@experiment runner：逐行跑 SUT → 打分 → 聚合。
+"""单系统 runner：逐行跑一个被测系统 → 打分 → 聚合 → 渲染表 + 落盘。
 
-本文件上半部（load_testset / _row_to_dict / score_row / aggregate）是纯逻辑，
-已 TDD；下半部 main 是 @experiment + Dataset 装配，靠集成 smoke 验证。
+本文件上半部（load_testset / _row_to_dict / score_row / aggregate /
+build_single_report）是纯逻辑，已 TDD；下半部 _run / main 是装配，靠集成 smoke 验证。
+与 compare（多变体 ablation）的区别：本入口只跑**一个**系统（默认 flags 的
+DocQueryWorkflow），共用 report.py 的渲染与落盘（单行表，自作 baseline，无 delta）。
 """
 import json
 import argparse
@@ -9,7 +11,14 @@ import asyncio
 import os
 
 from eval.harness.metrics import METRIC_NAMES, MetricSpec
+from eval.harness.report import (
+    default_result_paths,
+    render_delta_table,
+    write_detail_csv,
+)
 from eval.harness.sut import RagOutput, RagSystem
+
+SINGLE_SYSTEM_LABEL = "当前系统(默认flags)"
 
 
 def load_testset(path: str) -> list[dict]:
@@ -92,11 +101,15 @@ def aggregate(rows: list[dict]) -> dict:
     }
 
 
-async def _run(testset_path: str, limit: int | None) -> dict:
-    from ragas import Dataset, experiment
-    from ragas.backends import LocalCSVBackend
+def build_single_report(label: str, scored: list[dict]) -> tuple[dict, list[dict]]:
+    """单系统：aggregate 跑分 + 给每条明细打 variant 标（与 compare detail 同构，供落盘）。"""
+    report = aggregate(scored)
+    detail = [{"variant": label, **s} for s in scored]
+    return report, detail
 
-    from eval.config import CHROMA_DIR, RESULTS_DIR, make_eval_embeddings, make_eval_llm
+
+async def _run(testset_path: str, limit: int | None) -> tuple[dict, list[dict]]:
+    from eval.config import CHROMA_DIR, make_eval_embeddings, make_eval_llm
     from eval.harness.metrics import build_metric_specs
     from eval.harness.sut import DocQueryWorkflowSystem
     from configs.embedding import configure_embedding
@@ -107,43 +120,56 @@ async def _run(testset_path: str, limit: int | None) -> dict:
     if limit:
         rows = rows[:limit]
 
-    eval_llm = make_eval_llm()
-    eval_emb = make_eval_embeddings()
+    eval_llm, eval_emb = make_eval_llm(), make_eval_embeddings()
     metric_specs = build_metric_specs(eval_llm, eval_emb)
 
     # SUT 检索需要全局 Settings.embed_model 与 llm，二者都要先配置
     sut_llm = configure_llm()
     configure_embedding()
-    # 当前系统 DocQueryWorkflow（flags 缺省 = 构造默认决策配置）
+    # 单系统：默认 flags 的 DocQueryWorkflow（构造默认决策配置）
     sut = DocQueryWorkflowSystem(
         index_manager=RAGIndexManager(persist_dir=CHROMA_DIR), llm=sut_llm
     )
 
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    backend = LocalCSVBackend(root_dir=RESULTS_DIR)
-    dataset = Dataset(name="book_testset", backend=backend, data=rows)
-
-    @experiment()
-    async def book_rag_experiment(row, sut, metric_specs):
-        return await score_row(_row_to_dict(row), sut, metric_specs)
-
-    exp = await book_rag_experiment.arun(
-        dataset, name="book_rag", sut=sut, metric_specs=metric_specs,
-    )
-    result_rows = [_row_to_dict(r) for r in exp.to_pandas().to_dict("records")]
-    return aggregate(result_rows)
+    scored = [await score_row(_row_to_dict(r), sut, metric_specs) for r in rows]
+    return build_single_report(SINGLE_SYSTEM_LABEL, scored)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Book RAG ragas 评测")
+    parser = argparse.ArgumentParser(
+        description="Book RAG 单系统评测（默认 flags 的 DocQueryWorkflow）"
+    )
     parser.add_argument("--testset", default=None, help="测试集 jsonl 路径")
     parser.add_argument("--limit", type=int, default=None, help="只跑前 N 条")
+    parser.add_argument("--out", default=None,
+                        help="跑分表 Markdown 落盘路径；缺省 eval/results/run_eval_<时间戳>.md")
+    parser.add_argument("--detail", default=None,
+                        help="每条明细 CSV 落盘路径；缺省 eval/results/run_eval_<时间戳>_detail.csv")
     args = parser.parse_args()
 
     from eval.config import TESTSET_PATH
     path = args.testset or TESTSET_PATH
-    report = asyncio.run(_run(path, args.limit))
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    report, detail = asyncio.run(_run(path, args.limit))
+
+    # 单行表：该系统自作 baseline，无 delta；列与 compare 一致（分类准确率 + 5 ragas）
+    table = render_delta_table(
+        [{"name": SINGLE_SYSTEM_LABEL, "report": report}], baseline=SINGLE_SYSTEM_LABEL
+    )
+    print(table)
+
+    default_md, default_csv = default_result_paths("run_eval")
+    out_path = args.out or default_md
+    detail_path = args.detail or default_csv
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(f"# 单系统跑分（{SINGLE_SYSTEM_LABEL}）\n\n")
+        f.write(f"测试集：`{path}`" + (f"（前 {args.limit} 条）" if args.limit else "") + "\n\n")
+        f.write(table + "\n")
+    print(f"\n[已存] {out_path}")
+
+    write_detail_csv(detail, detail_path)
+    print(f"[已存明细] {detail_path}（共 {len(detail)} 行）")
 
 
 if __name__ == "__main__":

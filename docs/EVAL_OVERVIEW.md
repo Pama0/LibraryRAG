@@ -16,7 +16,7 @@
                             │ 喂入
 ┌─ Runner ──────────────────▼───────────────────────────┐
 │  compare.py   多变体 ablation → baseline vs 变体 delta 表 │ ← 主力
-│  run_eval.py  单变体跑分 → 存 CSV 明细到 results/         │
+│  run_eval.py  单系统跑分 → 表 + md/detail CSV 落盘 results/ │
 └───────────────────────────┬───────────────────────────┘
               ┌─────────────┴─────────────┐
         被测系统 SUT                   评测打分
@@ -131,10 +131,11 @@ ragas 自动集**只产窄事实题**（单 chunk 锚定），五类里只覆盖
 eval/
 ├── config.py          评测 judge LLM / embedding / 路径（顶层，大家都 import）
 ├── harness/           评测引擎
-│   ├── sut.py           被测系统适配器：DocQueryWorkflowSystem（带决策 flag）、RagOutput
+│   ├── sut.py           被测系统适配器：DocQueryWorkflowSystem（带决策 flag）、AgentSystem、RagOutput
 │   ├── metrics.py       5 个 ragas 指标的字段映射 + 装配
-│   ├── run_eval.py      单变体跑分：逐行 SUT→打分→聚合，存 CSV 到 results/
-│   └── compare.py       【主力】多变体 ablation，delta 表，--out 落盘 / --detail 明细 CSV
+│   ├── report.py        展示+落盘共用：render_delta_table（分类准确率+5 ragas 列）/ write_detail_csv / default_result_paths
+│   ├── run_eval.py      单系统跑分：逐行 SUT→打分→聚合→单行表+md/detail CSV 落盘（默认 flags）
+│   └── compare.py       【主力】多变体 ablation，delta 表，--out 落盘 / --detail 明细 CSV（共用 report.py）
 ├── datagen/           测试集 + 金标准生成
 │   ├── generate_testset.py        ragas TestsetGenerator 自动生成草稿（A+B 中文约束）
 │   ├── build_split_candidates.py  造 split/other/retrievable（离散度筛子 + 措辞模板）
@@ -146,7 +147,7 @@ eval/
 ├── utils/
 │   └── jsonl_to_csv.py            testset jsonl → csv 便于人工看
 ├── dataset/           测试集与金标准数据
-└── results/           run_eval 落盘的 ragas CSV
+└── results/           run_eval / compare 落盘的跑分表（md）+ 明细（detail.csv）
 ```
 
 ---
