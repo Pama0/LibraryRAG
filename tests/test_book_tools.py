@@ -1,9 +1,8 @@
 """book_tools 单测：两个工具类的方法 + 注册表工厂 + ctx 状态收集。"""
 import pytest
 
+from core.agent.tools import BookSearchTool, ListBooksTool
 from core.agent.tools.book_tools import (
-    BookSearchTool,
-    ListBooksTool,
     ToolContext,
     ToolSpec,
     _TOOL_REGISTRY,

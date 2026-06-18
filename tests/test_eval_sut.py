@@ -69,7 +69,7 @@ import pytest
 from eval.harness.sut import AgentSystem, _NullCtx
 
 
-class _FakeQaAgent:
+class _FakeAutoAgent:
     """记录构造与 run 入参，返回预置 (answer, sources)；可设为抛异常。"""
     last_instance = None
 
@@ -92,26 +92,26 @@ def test_nullctx_write_is_noop():
 
 
 async def test_agent_system_answered(monkeypatch):
-    monkeypatch.setattr("core.agent.qa_agent.QaAgent", _FakeQaAgent)
+    monkeypatch.setattr("core.agent.auto_agent.AutoAgent", _FakeAutoAgent)
     sut = AgentSystem(index_manager=object(), llm=object())
     out = await sut.answer("openclaw 架构与权衡")
     assert out.outcome == "answered"
     assert out.response == "综合答案"
     assert out.retrieved_contexts == ["片段A", "片段B"]
     assert out.category == ""
-    # 复用 QaAgent.run 时传入的是 _NullCtx
-    assert isinstance(_FakeQaAgent.last_instance.run_args["ctx"], _NullCtx)
+    # 复用 AutoAgent.run 时传入的是 _NullCtx
+    assert isinstance(_FakeAutoAgent.last_instance.run_args["ctx"], _NullCtx)
 
 
 async def test_agent_system_empty(monkeypatch):
-    monkeypatch.setattr("core.agent.qa_agent.QaAgent", _FakeQaAgent)
+    monkeypatch.setattr("core.agent.auto_agent.AutoAgent", _FakeAutoAgent)
     sut = AgentSystem(index_manager=object(), llm=object())
     out = await sut.answer("empty")
     assert out.outcome == "empty"
 
 
 async def test_agent_system_error_is_caught(monkeypatch):
-    monkeypatch.setattr("core.agent.qa_agent.QaAgent", _FakeQaAgent)
+    monkeypatch.setattr("core.agent.auto_agent.AutoAgent", _FakeAutoAgent)
     sut = AgentSystem(index_manager=object(), llm=object())
     out = await sut.answer("boom")
     assert out.outcome == "error"
