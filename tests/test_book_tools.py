@@ -111,6 +111,56 @@ def test_build_book_tools_unknown_name_raises():
         build_book_tools(_ctx(), ["nope"])
 
 
+class _RecordingRetriever:
+    """记录 retrieve 入参的假 Retriever，返回预置候选池。"""
+
+    def __init__(self, nodes):
+        self._nodes = nodes
+        self.calls = []
+
+    async def retrieve(self, query, *, index_manager, book_titles, top_k):
+        self.calls.append(dict(query=query, book_titles=book_titles, top_k=top_k))
+        return list(self._nodes)
+
+
+class _RecordingReranker:
+    """记录 rerank 入参的假 Reranker，截前 top_n。"""
+
+    def __init__(self):
+        self.calls = []
+
+    async def rerank(self, query, nodes, top_n):
+        self.calls.append(dict(query=query, top_n=top_n, n_in=len(nodes)))
+        return nodes[:top_n]
+
+
+async def test_book_search_overfetches_then_reranks_to_top_k():
+    pool = [_Node(f"片段{i}") for i in range(20)]
+    retr, rer = _RecordingRetriever(pool), _RecordingReranker()
+    ctx = _ctx(nodes=[])  # index_manager 只需 get_index() 非 None
+    ctx.retriever = retr
+    ctx.reranker = rer
+    ctx.similarity_top_k = 5
+    ctx.rerank_candidate_k = 20
+    out = await BookSearchTool(ctx)("q")
+    assert retr.calls[0]["top_k"] == 20   # 有 reranker → 过召回到候选池
+    assert rer.calls[0]["top_n"] == 5     # 重排截断到最终 top_k
+    assert len(ctx.sources) == 5
+    assert "片段0" in out
+
+
+async def test_book_search_no_reranker_fetches_top_k_only():
+    pool = [_Node("a"), _Node("b")]
+    retr = _RecordingRetriever(pool)
+    ctx = _ctx(nodes=[])
+    ctx.retriever = retr
+    ctx.reranker = None
+    ctx.similarity_top_k = 3
+    await BookSearchTool(ctx)("q")
+    assert retr.calls[0]["top_k"] == 3    # 无 reranker → 不过召回
+    assert len(ctx.sources) == 2
+
+
 def test_assemble_tools_default_returns_both_and_numbered_prompt():
     tools, prompt = assemble_tools(_ctx())
     assert sorted(t.metadata.name for t in tools) == ["book_search", "list_books"]

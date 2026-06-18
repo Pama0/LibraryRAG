@@ -16,6 +16,8 @@ from llama_index.core.agent.workflow import FunctionAgent
 from llama_index.core.llms import LLM
 
 from core.agent.tools import ToolContext, assemble_tools
+from core.retrieval.rerank import make_reranker
+from core.retrieval.retrieve import make_retriever
 from core.workflow.qa_capability import (
     AnswerDeltaEvent,
     RetrievalDoneEvent,
@@ -48,18 +50,29 @@ class AutoAgent:
         similarity_top_k: int = 5,
         max_iterations: int = 6,
         tool_selection: Optional[list] = None,
+        retriever_name: str = "hybrid",
+        reranker_name: Optional[str] = "bge-reranker-v2-m3",
+        rerank_candidate_k: int = 20,
     ):
         self.llm = llm
         self.max_iterations = max_iterations
         self.tool_selection = tool_selection
+        # 默认装更强的检索组合（hybrid + bge 重排），让自主规划 agent 拿到更好证据；
+        # 名字→对象的解析推迟到 _ensure_agent（首跑），避免构造期就加载 reranker 模型。
+        self._retriever_name = retriever_name
+        self._reranker_name = reranker_name
         self.ctx = ToolContext(
-            index_manager=index_manager, similarity_top_k=similarity_top_k
+            index_manager=index_manager,
+            similarity_top_k=similarity_top_k,
+            rerank_candidate_k=rerank_candidate_k,
         )
         # 懒构造：FunctionAgent 需合法 LLM 且较重，只在真要跑时才建。
         self.agent = None
 
     def _ensure_agent(self) -> FunctionAgent:
         if self.agent is None:
+            self.ctx.retriever = make_retriever(self._retriever_name)
+            self.ctx.reranker = make_reranker(self._reranker_name)
             tools, tools_prompt = assemble_tools(self.ctx, self.tool_selection)
             self.agent = FunctionAgent(
                 tools=tools,
