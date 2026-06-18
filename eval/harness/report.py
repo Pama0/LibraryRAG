@@ -17,6 +17,9 @@ _COLS = [
     ("factual_correctness", lambda rep: rep.get("metric_means", {}).get("factual_correctness")),
     ("faithfulness", lambda rep: rep.get("metric_means", {}).get("faithfulness")),
     ("answer_relevancy", lambda rep: rep.get("metric_means", {}).get("answer_relevancy")),
+    # 成本列：越低越好——delta 为正＝更贵（与上面质量列符号相反，读法见 EVAL_OVERVIEW）
+    ("时延(s/条)", lambda rep: rep.get("cost", {}).get("mean_latency_s")),
+    ("tokens/条", lambda rep: rep.get("cost", {}).get("mean_total_tokens")),
 ]
 
 
@@ -52,6 +55,7 @@ _DETAIL_COLS = [
     "reference", "response", "num_contexts",
     "faithfulness", "answer_relevancy", "context_precision",
     "context_recall", "factual_correctness",
+    "latency_s", "prompt_tokens", "completion_tokens", "total_tokens",
 ]
 
 _RESULT_DIR = os.path.join("eval", "results")
