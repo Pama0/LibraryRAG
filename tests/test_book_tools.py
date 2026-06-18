@@ -5,7 +5,11 @@ from core.agent.tools.book_tools import (
     BookSearchTool,
     ListBooksTool,
     ToolContext,
+    ToolSpec,
+    _TOOL_REGISTRY,
+    assemble_tools,
     build_book_tools,
+    register_tool,
 )
 
 
@@ -105,4 +109,55 @@ def test_build_book_tools_default_returns_both():
 
 def test_build_book_tools_unknown_name_raises():
     with pytest.raises(ValueError):
-        build_book_tools(_ctx(), names=["nope"])
+        build_book_tools(_ctx(), ["nope"])
+
+
+def test_assemble_tools_default_returns_both_and_numbered_prompt():
+    tools, prompt = assemble_tools(_ctx())
+    assert sorted(t.metadata.name for t in tools) == ["book_search", "list_books"]
+    assert "1. " in prompt and "2. " in prompt
+    assert "book_search(query)" in prompt
+    assert "list_books()" in prompt
+
+
+def test_assemble_tools_subset_only_selected():
+    tools, prompt = assemble_tools(_ctx(), ["book_search"])
+    assert [t.metadata.name for t in tools] == ["book_search"]
+    assert "book_search(query)" in prompt
+    assert "list_books" not in prompt
+
+
+def test_assemble_tools_usage_override_replaces_default():
+    _, prompt = assemble_tools(_ctx(), [ToolSpec("book_search", usage="自定义X")])
+    assert "自定义X" in prompt
+    assert "book_search(query)" not in prompt
+
+
+def test_assemble_tools_unknown_name_raises():
+    with pytest.raises(ValueError):
+        assemble_tools(_ctx(), ["nope"])
+
+
+def test_assemble_tools_falls_back_to_description_when_no_prompt_usage():
+    @register_tool
+    class _TmpTool:
+        name = "_tmp_tool"
+        description = "临时工具描述"
+
+        def __init__(self, ctx):
+            self.ctx = ctx
+
+        def __call__(self) -> str:
+            return ""
+
+        def to_function_tool(self):
+            from llama_index.core.tools import FunctionTool
+            return FunctionTool.from_defaults(
+                fn=self.__call__, name=self.name, description=self.description
+            )
+
+    try:
+        _, prompt = assemble_tools(_ctx(), ["_tmp_tool"])
+        assert "临时工具描述" in prompt
+    finally:
+        _TOOL_REGISTRY.pop("_tmp_tool", None)

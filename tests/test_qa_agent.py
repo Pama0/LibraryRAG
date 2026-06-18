@@ -8,6 +8,7 @@ from llama_index.core.llms import MockLLM
 from llama_index.core.tools import ToolOutput
 
 from core.agent.qa_agent import QaAgent
+from core.agent.tools.book_tools import ToolSpec
 
 
 class FakeRetriever:
@@ -120,3 +121,21 @@ async def test_run_resets_sources_each_call_and_passes_max_iterations():
     assert nodes == []
     assert qa.agent.last_kwargs.get("max_iterations") == 6
     assert qa.agent.last_kwargs.get("user_msg") == "q"
+
+
+def test_qa_agent_default_prompt_lists_both_tools():
+    qa = QaAgent(FakeIndexManager(nodes=[]), MockLLM())
+    agent = qa._ensure_agent()
+    assert "book_search(query)" in agent.system_prompt
+    assert "list_books()" in agent.system_prompt
+
+
+def test_qa_agent_tool_selection_overrides_usage_in_prompt():
+    qa = QaAgent(
+        FakeIndexManager(nodes=[]),
+        MockLLM(),
+        tool_selection=[ToolSpec("book_search", usage="覆盖语")],
+    )
+    agent = qa._ensure_agent()
+    assert "覆盖语" in agent.system_prompt
+    assert "book_search(query)" not in agent.system_prompt

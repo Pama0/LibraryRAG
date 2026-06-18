@@ -38,8 +38,11 @@ from .rag.pdf_parser import BookPDFParser
 ### 工具在组装层创建，注入 Agent
 
 检索工具现位于 `core/agent/tools/`：用
-`core.agent.tools.build_book_tools(ToolContext(index_manager))` 经注册表 + 工厂组装
-成 `FunctionTool` 列表。`QaAgent` 已接入（`self.ctx` 即 `ToolContext`，持
+`core.agent.tools.assemble_tools(ToolContext(index_manager), selection)` 经注册表 + 工厂
+同时产出 `FunctionTool` 列表与 system prompt 的工具清单文本（二者同源不脱节）；只要工具
+列表用 `build_book_tools`。工具用法说明不写死在 prompt——agent 用 `ToolSpec(name, usage=...)`
+选择工具子集并可逐个覆盖 usage（`QaAgent` 的 `tool_selection` 参数即此入口，默认 None=全集
+默认 usage）。`QaAgent` 已接入（`self.ctx` 即 `ToolContext`，持
 `index_manager`/`similarity_top_k`/`scope`/`sources`）；其它 agent（如
 `BookAgent`）可同样注入复用。新增 workflow 工具见 `core/workflow/README.md`。
 
