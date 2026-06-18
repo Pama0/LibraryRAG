@@ -37,9 +37,11 @@ from .rag.pdf_parser import BookPDFParser
 
 ### 工具在组装层创建，注入 Agent
 
-`api/main.py`（Web）与根 `main.py`（CLI）在各自组装层用
-`core.tools.book_tools.create_book_search_tool / create_list_books_tool`
-创建工具，注入 `core.agent.agent.BookAgent`。新增 workflow 工具见 `core/workflow/README.md`。
+检索工具现位于 `core/agent/tools/`：用
+`core.agent.tools.build_book_tools(ToolContext(index_manager))` 经注册表 + 工厂组装
+成 `FunctionTool` 列表。`QaAgent` 已接入（`self.ctx` 即 `ToolContext`，持
+`index_manager`/`similarity_top_k`/`scope`/`sources`）；其它 agent（如
+`BookAgent`）可同样注入复用。新增 workflow 工具见 `core/workflow/README.md`。
 
 ### 法条遗留
 

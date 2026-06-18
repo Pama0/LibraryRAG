@@ -1,4 +1,4 @@
-"""QaAgent 单测：检索工具（_search）+ run 流式桥接。
+"""QaAgent 单测：run 流式桥接与 sources 重置。
 
 FunctionAgent 是真实组件，不在单测范围——用 MockLLM 让其构造通过，run 测试
 用 fake agent 替身（产真 ToolCall/ToolCallResult 事件 + 可 await 的 final）。
@@ -21,10 +21,8 @@ class FakeRetriever:
 class FakeIndex:
     def __init__(self, nodes):
         self._nodes = nodes
-        self.last_kw = None
 
     def as_retriever(self, **kw):
-        self.last_kw = kw
         return FakeRetriever(self._nodes)
 
 
@@ -43,14 +41,6 @@ class FakeIndexManager:
 
     def get_index(self):
         return self._index
-
-
-class _Node:
-    def __init__(self, content):
-        self._c = content
-
-    def get_content(self):
-        return self._c
 
 
 class FakeCtx:
@@ -91,24 +81,6 @@ def _agent(index_manager=None):
     return QaAgent(index_manager, MockLLM(), similarity_top_k=3, max_iterations=6)
 
 
-async def test_search_returns_joined_passages_and_collects_nodes():
-    qa = _agent(FakeIndexManager(nodes=[_Node("片段A"), _Node("片段B")]))
-    qa._run_scope = None
-    qa._run_sources = []
-    out = await qa._search("分布式事务")
-    assert "片段A" in out and "片段B" in out
-    assert len(qa._run_sources) == 2
-
-
-async def test_search_empty_returns_placeholder_and_collects_nothing():
-    qa = _agent(FakeIndexManager(nodes=[]))
-    qa._run_scope = None
-    qa._run_sources = []
-    out = await qa._search("不存在")
-    assert out == "（未检索到相关内容）"
-    assert qa._run_sources == []
-
-
 async def test_run_bridges_tool_events_and_emits_final_delta():
     qa = _agent(FakeIndexManager(nodes=[]))
     events = [
@@ -140,7 +112,7 @@ async def test_run_bridges_tool_events_and_emits_final_delta():
 
 async def test_run_resets_sources_each_call_and_passes_max_iterations():
     qa = _agent(FakeIndexManager(nodes=[]))
-    qa._run_sources = ["stale"]
+    qa.ctx.sources = ["stale"]
     qa.agent = FakeAgent([], final="答案")
     ctx = FakeCtx()
 
