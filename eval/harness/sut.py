@@ -38,12 +38,12 @@ def map_doc_result(result, response_cls=None) -> RagOutput:
 
 
 def _node_text(n) -> str:
-    """从 NodeWithScore / Node 取正文（镜像 QaAgent._search 的提取逻辑）。"""
+    """从 NodeWithScore / Node 取正文（镜像 BookSearchTool 的提取逻辑）。"""
     return n.get_content() if hasattr(n, "get_content") else getattr(n, "text", "")
 
 
 def map_agent_result(answer: str, sources: list) -> RagOutput:
-    """QaAgent.run() 的 (answer, source_nodes) → RagOutput；agent 不产分类，category 恒空。"""
+    """AutoAgent.run() 的 (answer, source_nodes) → RagOutput；agent 不产分类，category 恒空。"""
     text = (answer or "").strip()
     if not text or not sources:
         return RagOutput(text, [], "empty", "")
@@ -77,9 +77,9 @@ class DocQueryWorkflowSystem:
         return map_doc_result(result)
 
 
-# ── agent 自主规划路线（QaAgent，绕过 DocQueryWorkflow 决策路由）──────
+# ── agent 自主规划路线（AutoAgent，绕过 DocQueryWorkflow 决策路由）──────
 class _NullCtx:
-    """QaAgent.run 需要带 write_event_to_stream 的 ctx 推前端流式事件；
+    """AutoAgent.run 需要带 write_event_to_stream 的 ctx 推前端流式事件；
     评测无 workflow ctx，用 no-op 替身。最终答案来自 await handler，与 ctx 无关。"""
 
     def write_event_to_stream(self, event) -> None:  # noqa: D401 — no-op
@@ -87,7 +87,7 @@ class _NullCtx:
 
 
 class AgentSystem:
-    """被测系统：每条 query 直接喂有界 QaAgent 自主规划检索，实现 RagSystem。"""
+    """被测系统：每条 query 直接喂有界 AutoAgent 自主规划检索，实现 RagSystem。"""
 
     def __init__(self, index_manager, llm,
                  similarity_top_k: int = 5, max_iterations: int = 6):
@@ -97,15 +97,15 @@ class AgentSystem:
         self._max_iterations = max_iterations
 
     async def answer(self, query: str, book_titles=None) -> RagOutput:
-        from core.agent.qa_agent import QaAgent
+        from core.agent.auto_agent import AutoAgent
 
-        qa = QaAgent(
+        agent = AutoAgent(
             self._index_manager, self._llm,
             similarity_top_k=self._similarity_top_k,
             max_iterations=self._max_iterations,
         )
         try:
-            answer, sources = await qa.run(_NullCtx(), query, book_titles)
+            answer, sources = await agent.run(_NullCtx(), query, book_titles)
         except Exception as e:  # noqa: BLE001 — 单条异常记 error 不中断
             return RagOutput(f"{type(e).__name__}: {e}", [], "error", "")
         return map_agent_result(answer, sources)

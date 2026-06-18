@@ -3,6 +3,7 @@
 变体 = 一组决策 flag（probe/split/assume/other 的 on-off）。baseline 通常全单轮，
 逐个打开决策，对比表每行一个变体、delta 列即"该决策带来多少提升"。
 """
+# agent vs 全开（delta 相对全开）python -m eval.harness.compare --testset eval/dataset/golden.jsonl --variants "全开" "agent(自主规划)"
 import argparse
 import asyncio
 import os

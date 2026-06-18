@@ -56,7 +56,7 @@
 ### Layer 0 替代 · agent 自主规划路线（对照系）
 除上面的 `DocQueryWorkflow`，评测另有第二被测系统 `eval/harness/sut.py` 的
 `AgentSystem`：**绕过 IntentRouter + category 分类**，每条 query 直接喂给有界
-`QaAgent`（FunctionAgent + book_search/list_books，自主多轮规划检索）。它**不产
+`AutoAgent`（FunctionAgent + book_search/list_books，自主多轮规划检索）。它**不产
 category**，故分类准确率列显示「—」，只在 5 个 ragas 答案质量指标上与 workflow 同台对比。
 用途：回答「显式决策路由 vs 让 agent 自己规划」到底谁强。
 
