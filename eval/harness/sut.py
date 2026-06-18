@@ -75,3 +75,37 @@ class DocQueryWorkflowSystem:
         except Exception as e:  # noqa: BLE001 — 单条异常记 error 不中断
             return RagOutput(f"{type(e).__name__}: {e}", [], "error", "")
         return map_doc_result(result)
+
+
+# ── agent 自主规划路线（QaAgent，绕过 DocQueryWorkflow 决策路由）──────
+class _NullCtx:
+    """QaAgent.run 需要带 write_event_to_stream 的 ctx 推前端流式事件；
+    评测无 workflow ctx，用 no-op 替身。最终答案来自 await handler，与 ctx 无关。"""
+
+    def write_event_to_stream(self, event) -> None:  # noqa: D401 — no-op
+        pass
+
+
+class AgentSystem:
+    """被测系统：每条 query 直接喂有界 QaAgent 自主规划检索，实现 RagSystem。"""
+
+    def __init__(self, index_manager, llm,
+                 similarity_top_k: int = 5, max_iterations: int = 6):
+        self._index_manager = index_manager
+        self._llm = llm
+        self._similarity_top_k = similarity_top_k
+        self._max_iterations = max_iterations
+
+    async def answer(self, query: str, book_titles=None) -> RagOutput:
+        from core.agent.qa_agent import QaAgent
+
+        qa = QaAgent(
+            self._index_manager, self._llm,
+            similarity_top_k=self._similarity_top_k,
+            max_iterations=self._max_iterations,
+        )
+        try:
+            answer, sources = await qa.run(_NullCtx(), query, book_titles)
+        except Exception as e:  # noqa: BLE001 — 单条异常记 error 不中断
+            return RagOutput(f"{type(e).__name__}: {e}", [], "error", "")
+        return map_agent_result(answer, sources)

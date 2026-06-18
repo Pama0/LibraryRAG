@@ -62,3 +62,58 @@ def test_agent_empty_when_no_sources():
 def test_agent_empty_when_blank_answer():
     out = map_agent_result("   ", [_Node("片段A")])
     assert out.outcome == "empty"
+
+
+# ── AgentSystem + _NullCtx ──
+import pytest
+from eval.harness.sut import AgentSystem, _NullCtx
+
+
+class _FakeQaAgent:
+    """记录构造与 run 入参，返回预置 (answer, sources)；可设为抛异常。"""
+    last_instance = None
+
+    def __init__(self, index_manager, llm, similarity_top_k=5, max_iterations=6):
+        self.kw = dict(similarity_top_k=similarity_top_k, max_iterations=max_iterations)
+        self.run_args = None
+        type(self).last_instance = self
+
+    async def run(self, ctx, query, book_titles):
+        self.run_args = dict(ctx=ctx, query=query, book_titles=book_titles)
+        if query == "boom":
+            raise RuntimeError("agent 崩了")
+        if query == "empty":
+            return ("", [])
+        return ("综合答案", [_Node("片段A"), _Node("片段B")])
+
+
+def test_nullctx_write_is_noop():
+    assert _NullCtx().write_event_to_stream("任意事件") is None
+
+
+async def test_agent_system_answered(monkeypatch):
+    monkeypatch.setattr("core.agent.qa_agent.QaAgent", _FakeQaAgent)
+    sut = AgentSystem(index_manager=object(), llm=object())
+    out = await sut.answer("openclaw 架构与权衡")
+    assert out.outcome == "answered"
+    assert out.response == "综合答案"
+    assert out.retrieved_contexts == ["片段A", "片段B"]
+    assert out.category == ""
+    # 复用 QaAgent.run 时传入的是 _NullCtx
+    assert isinstance(_FakeQaAgent.last_instance.run_args["ctx"], _NullCtx)
+
+
+async def test_agent_system_empty(monkeypatch):
+    monkeypatch.setattr("core.agent.qa_agent.QaAgent", _FakeQaAgent)
+    sut = AgentSystem(index_manager=object(), llm=object())
+    out = await sut.answer("empty")
+    assert out.outcome == "empty"
+
+
+async def test_agent_system_error_is_caught(monkeypatch):
+    monkeypatch.setattr("core.agent.qa_agent.QaAgent", _FakeQaAgent)
+    sut = AgentSystem(index_manager=object(), llm=object())
+    out = await sut.answer("boom")
+    assert out.outcome == "error"
+    assert "RuntimeError" in out.response
+    assert out.category == ""
