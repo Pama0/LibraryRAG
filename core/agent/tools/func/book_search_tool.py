@@ -56,6 +56,11 @@ class BookSearchTool:
             return "请提供要检索的问题。"
         if self.ctx.index_manager.get_index() is None:
             return "知识库为空，请先上传 PDF。"
+        # 重复调用保护：同一 query（归一化）本轮检索过就短路，打断空转、推 agent 收敛。
+        key = query.lower()
+        if key in self.ctx.searched_queries:
+            return "（该查询已检索过，请换关键词/角度，或基于已检索到的片段作答。）"
+        self.ctx.searched_queries.add(key)
         reranker = self.ctx.reranker
         fetch_k = self.ctx.rerank_candidate_k if reranker else self.ctx.similarity_top_k
         nodes = await self.ctx.retriever.retrieve(

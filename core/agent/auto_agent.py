@@ -53,9 +53,11 @@ class AutoAgent:
         retriever_name: str = "hybrid",
         reranker_name: Optional[str] = "bge-reranker-v2-m3",
         rerank_candidate_k: int = 20,
+        timeout: float = 120.0,
     ):
         self.llm = llm
         self.max_iterations = max_iterations
+        self.timeout = timeout  # 整轮 wall-clock 上限，挂死时 fail-fast（异常交调用方处理）
         self.tool_selection = tool_selection
         # 默认装更强的检索组合（hybrid + bge 重排），让自主规划 agent 拿到更好证据；
         # 名字→对象的解析推迟到 _ensure_agent（首跑），避免构造期就加载 reranker 模型。
@@ -79,6 +81,7 @@ class AutoAgent:
                 llm=self.llm,
                 system_prompt=AUTO_AGENT_SYSTEM_PROMPT.format(tools=tools_prompt),
                 early_stopping_method="generate",
+                timeout=self.timeout,
             )
         return self.agent
 
@@ -88,6 +91,7 @@ class AutoAgent:
         """跑有界 agent，桥接流式事件到外层 ctx，返回 (答案, source_nodes)。"""
         self.ctx.scope = book_titles
         self.ctx.sources = []
+        self.ctx.searched_queries = set()
         logger.info(
             "auto_agent 启动: query=%r max_iter=%d", query[:80], self.max_iterations
         )

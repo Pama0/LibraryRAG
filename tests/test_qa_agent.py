@@ -123,6 +123,14 @@ async def test_run_resets_sources_each_call_and_passes_max_iterations():
     assert qa.agent.last_kwargs.get("user_msg") == "q"
 
 
+async def test_run_resets_searched_queries_each_call():
+    qa = _agent(FakeIndexManager(nodes=[]))
+    qa.ctx.searched_queries = {"stale"}
+    qa.agent = FakeAgent([], final="答案")
+    await qa.run(FakeCtx(), "q", None)
+    assert qa.ctx.searched_queries == set()
+
+
 def test_qa_agent_default_prompt_lists_both_tools():
     qa = QaAgent(FakeIndexManager(nodes=[]), MockLLM())
     agent = qa._ensure_agent()

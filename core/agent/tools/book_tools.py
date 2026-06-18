@@ -29,6 +29,7 @@ class ToolContext:
     similarity_top_k: int = 5
     scope: Optional[list[str]] = None
     sources: list = field(default_factory=list)
+    searched_queries: set = field(default_factory=set)  # 本轮已检索过的 query（归一化 key），防重复空转
     retriever: "Retriever" = field(default_factory=lambda: make_retriever("vector"))
     reranker: "Reranker | None" = None
     rerank_candidate_k: int = 20

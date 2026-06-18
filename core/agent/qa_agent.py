@@ -82,6 +82,7 @@ class QaAgent:
         """
         self.ctx.scope = book_titles
         self.ctx.sources = []
+        self.ctx.searched_queries = set()
         logger.info(
             "qa_agent 启动: query=%r max_iter=%d", query[:80], self.max_iterations
         )

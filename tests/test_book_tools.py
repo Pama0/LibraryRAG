@@ -162,6 +162,28 @@ async def test_book_search_dedups_sources_by_node_id_across_calls():
     assert len(ctx.sources) == 2  # a、b 各一次，q2 的重复 a 被去掉
 
 
+async def test_book_search_short_circuits_repeated_query():
+    retr = _RecordingRetriever([_Node("片段", node_id="a")])
+    ctx = _ctx(nodes=[])
+    ctx.reranker = None
+    ctx.retriever = retr
+    out1 = await BookSearchTool(ctx)("同一句")
+    out2 = await BookSearchTool(ctx)("同一句")
+    assert len(retr.calls) == 1          # 第二次同 query 不再检索
+    assert "该查询已检索过" in out2
+    assert "片段" in out1
+
+
+async def test_book_search_distinct_queries_each_retrieve():
+    retr = _RecordingRetriever([_Node("x", node_id="a")])
+    ctx = _ctx(nodes=[])
+    ctx.reranker = None
+    ctx.retriever = retr
+    await BookSearchTool(ctx)("q1")
+    await BookSearchTool(ctx)("q2")
+    assert len(retr.calls) == 2          # 不同 query 各检索一次
+
+
 async def test_book_search_prefixes_source_metadata():
     n = _Node("正文内容", node_id="x", metadata={
         "book_title": "MySQL核心技术", "chapter": "事务", "page_start": 45, "page_end": 46,
