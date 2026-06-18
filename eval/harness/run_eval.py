@@ -132,6 +132,7 @@ def build_single_report(label: str, scored: list[dict]) -> tuple[dict, list[dict
 async def _run(testset_path: str, limit: int | None) -> tuple[dict, list[dict]]:
     from eval.config import CHROMA_DIR, make_eval_embeddings, make_eval_llm
     from eval.harness.metrics import build_metric_specs
+    from eval.harness.meter import attach_token_meter
     from eval.harness.sut import DocQueryWorkflowSystem
     from configs.embedding import configure_embedding
     from configs.llm import configure_llm
@@ -147,12 +148,13 @@ async def _run(testset_path: str, limit: int | None) -> tuple[dict, list[dict]]:
     # SUT 检索需要全局 Settings.embed_model 与 llm，二者都要先配置
     sut_llm = configure_llm()
     configure_embedding()
+    meter = attach_token_meter(sut_llm)  # 挂在 SUT llm 上 → 只数被测系统 token（逐行 reset）
     # 单系统：默认 flags 的 DocQueryWorkflow（构造默认决策配置）
     sut = DocQueryWorkflowSystem(
         index_manager=RAGIndexManager(persist_dir=CHROMA_DIR), llm=sut_llm
     )
 
-    scored = [await score_row(_row_to_dict(r), sut, metric_specs) for r in rows]
+    scored = [await score_row(_row_to_dict(r), sut, metric_specs, meter=meter) for r in rows]
     return build_single_report(SINGLE_SYSTEM_LABEL, scored)
 
 

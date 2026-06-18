@@ -81,6 +81,13 @@ category**，故分类准确率列显示「—」，只在 5 个 ragas 答案质
 
 把 SUT 实判的 `category` 与金标准 `expected_category` 逐条比，算准确率。**这是量化 probe/split 等决策提升的主指标**（不依赖评测 LLM 的语义判断，最干净）。
 
+### 3.3 成本：时延 + token（`eval/harness/meter.py`）
+
+表里还有两列成本：**时延(s/条)** 和 **tokens/条**（明细 CSV 另含 `latency_s`/`prompt_tokens`/`completion_tokens`/`total_tokens`）。
+
+- token 由 LlamaIndex `TokenCountingHandler` 挂在 **SUT llm 实例**上客户端计数——只数被测系统、排除评测 judge；流式/非流式都从响应文本算，绕开 DeepSeek 流式不返回 usage 的缺口。只数 **LLM token，不含 embedding**；客户端近似（cl100k 代 DeepSeek 分词），仅供**跨系统相对比较**，不当账单。
+- ⚠️ **读法**：这两列**越低越好**，故 delta 为正＝更贵、为负＝更省，**与上面质量列（越高越好）符号相反**。看 agent 自主规划路线时尤其明显：质量未必更高，token/时延通常高出单轮 workflow 一截。
+
 ---
 
 ## 4. 数据集（eval/dataset/）

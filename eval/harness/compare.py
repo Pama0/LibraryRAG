@@ -62,6 +62,7 @@ def resolve_baseline(baseline: str, variant_names: list[str]) -> str:
 async def _run_variants(testset_path, limit, names):
     from eval.config import CHROMA_DIR, make_eval_embeddings, make_eval_llm
     from eval.harness.metrics import build_metric_specs
+    from eval.harness.meter import attach_token_meter
     from eval.harness.run_eval import load_testset, score_row, aggregate
     from configs.embedding import configure_embedding
     from configs.llm import configure_llm
@@ -74,13 +75,14 @@ async def _run_variants(testset_path, limit, names):
     metric_specs = build_metric_specs(eval_llm, eval_emb)
     sut_llm = configure_llm()
     configure_embedding()
+    meter = attach_token_meter(sut_llm)  # 挂在 SUT llm 上 → 只数被测系统 token（逐行 reset）
     index_manager = RAGIndexManager(persist_dir=CHROMA_DIR)
 
     variants = []
     detail = []  # 每条明细（带 variant 列），供 --detail 落盘
     for name in names:
         sut = build_sut(name, index_manager, sut_llm)
-        scored = [await score_row(r, sut, metric_specs) for r in rows]
+        scored = [await score_row(r, sut, metric_specs, meter=meter) for r in rows]
         for s in scored:
             detail.append({"variant": name, **s})
         variants.append({"name": name, "report": aggregate(scored)})
