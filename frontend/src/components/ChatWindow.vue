@@ -96,6 +96,9 @@ const messages = ref<Message[]>([])
 const input = ref('')
 const loading = ref(false)
 const messagesEl = ref<HTMLElement>()
+// 本轮 send 由后端自动创建并回填的会话 id。用于让下面的 sessionId watch
+// 区分"外部切换会话（需重载历史）"和"自己刚建的会话（live 消息已在手里，别重载）"。
+const selfResolvedId = ref<string | null>(null)
 
 // 查询范围：用户多选的书名；空数组表示全库（后端回落 category 逻辑）
 const books = ref<BookInfo[]>([])
@@ -129,6 +132,14 @@ function clearScope() {
 watch(
   () => props.sessionId,
   async (sid) => {
+    // 竞态防护：发首条消息时后端在流的最前面回填了新建会话 id，会让 props.sessionId
+    // 由 null→id 变化触发本 watch。此时 live 消息（用户问 + 流式答）已在 messages 里，
+    // 后端尚未持久化，若清空重载会拿到空历史、并使流式 assistantMsg 脱离数组 → 界面像卡住。
+    // 故对"自己这轮建的会话"直接跳过清空重载。
+    if (sid && sid === selfResolvedId.value) {
+      selfResolvedId.value = null
+      return
+    }
     messages.value = []
     if (!sid) return
     try {
@@ -214,6 +225,9 @@ async function send() {
   } finally {
     loading.value = false
     assistantMsg.stepsExpanded = false // 生成结束：收起思考过程，突出最终答案
+    // 流结束后清掉自建会话标记：它只用于拦截本轮流式中的那一次 watch 重载；
+    // 留着会让之后"切走再切回同一会话"被误判而跳过历史重载。
+    selfResolvedId.value = null
     scrollToBottom()
     emit('message-sent')
   }
@@ -241,8 +255,12 @@ function handleEvent(
 ) {
   switch (payload.type) {
     case 'session': {
-      // 后端确认/创建了 session_id，通知父组件同步
-      if (payload.session_id) emit('session-resolved', payload.session_id)
+      // 后端确认/创建了 session_id，通知父组件同步。
+      // 先打标记：这是本轮自建会话，父组件回填导致的 props.sessionId 变化不应触发历史重载。
+      if (payload.session_id) {
+        selfResolvedId.value = payload.session_id
+        emit('session-resolved', payload.session_id)
+      }
       break
     }
     case 'tool_call': {
