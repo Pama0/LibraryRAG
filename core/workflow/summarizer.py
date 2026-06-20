@@ -16,7 +16,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# 摘要消息在 memory 里的前缀标记：build_memory 用它前置摘要，intent_router.format_history
+# 摘要消息在 memory 里的前缀标记：build_memory 用它前置摘要，front_door.format_history
 # 用它识别并【永远保留】摘要头（否则摘要落在最近窗口之外会被截断，压缩等于白做）。
 SUMMARY_MARKER = "[早期对话摘要]"
 

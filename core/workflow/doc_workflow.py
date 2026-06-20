@@ -2,8 +2,9 @@
 
 与 book_rag.BookRagWorkflow 的本质区别：
 - 本 workflow 升为【顶层编排器】，持有并贯穿同一套会话 memory。
-- 门口 Router（intent_router）：读会话记忆消指代 + 规范化 → clean_query，再意图
-  分类 → qa / study_plan / ...，确定性 dispatch。横切的"干净自包含 query"在此产出。
+- 门口准入节点（front_door.FrontDoorAgent）：读会话记忆消指代 + 规范化 → clean_query，
+  再四出口决策（dispatch_qa / dispatch_study_plan / converse / clarify），确定性 dispatch。
+  横切的"干净自包含 query"在此产出。
 - QA capability（qa_capability.QaCapability，注入）：拿 clean_query 做【降噪 + 难度
   分类】（检索专属，不再消指代），按 category 路由到各分支【检索 + 流式合成】。
   本 workflow 不再自持检索/合成实质逻辑，只做 step 图编排 + 薄委托。
