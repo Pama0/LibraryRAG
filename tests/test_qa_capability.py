@@ -662,3 +662,70 @@ async def test_split_synthesize_single_subquery_degrades_to_single():
     assert len(qa._synth_calls) == 1
     assert qa._synth_calls[0][0] == "locate"   # 仍对原始问题单次合成
     assert "##" not in answer
+
+
+# ── explain：宽召回 → 列骨架 → 每节点检索 → 教学体合成 ──────────────────
+import pytest
+from core.workflow.qa_capability import EmptySkeleton
+
+
+class _RecallNode:
+    """宽召回返回的 node 替身：explain 用 n.text 抽 passages。"""
+
+    def __init__(self, text):
+        self.text = text
+
+
+async def test_explain_builds_sections_from_skeleton():
+    qa = _qa(FakeIndexManager(nodes=[]))
+    ctx = FakeCtx()
+
+    async def fake_recall(query, book_titles):
+        return [_RecallNode("w1"), _RecallNode("w2")]   # 宽召回片段（node 替身）
+
+    async def fake_outline(query, passages, max_items=8):
+        return ["索引基础", "事务基础"]          # 骨架两节
+
+    async def fake_retrieve_all(sub_queries, book_titles):
+        return [["a1"], ["b1"]]                  # 每节点各自命中
+
+    async def fake_synth(ctx, query, nodes):
+        return f"[{query}]"
+
+    qa._explain_recall = fake_recall
+    qa.outliner.run = fake_outline
+    qa._retrieve_all = fake_retrieve_all
+    qa._synthesize_stream = fake_synth
+
+    answer, nodes = await qa.explain(ctx, "MySQL基础知识", None)
+    assert "## 索引基础" in answer and "## 事务基础" in answer   # 逐节标题
+    assert "[索引基础]" in answer                                # 逐节正文来自该节合成
+    assert nodes == ["a1", "b1"]                                # 去重合并池
+
+
+async def test_explain_empty_skeleton_raises():
+    qa = _qa(FakeIndexManager(nodes=[]))
+    ctx = FakeCtx()
+
+    async def fake_recall(query, book_titles):
+        return [_RecallNode("w1")]
+
+    async def fake_outline(query, passages, max_items=8):
+        return []                                # 列不出骨架
+
+    qa._explain_recall = fake_recall
+    qa.outliner.run = fake_outline
+
+    with pytest.raises(EmptySkeleton):
+        await qa.explain(ctx, "讲讲X", None)
+
+
+async def test_gate_delegates_to_query_gate():
+    qa = _qa()
+
+    async def fake_run(clean_query):
+        return "降噪后", "explain"
+
+    qa._gate.run = fake_run
+    denoised, intent = await qa.gate("原始 query")
+    assert (denoised, intent) == ("降噪后", "explain")

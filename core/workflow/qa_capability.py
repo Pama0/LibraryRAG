@@ -31,9 +31,15 @@ from core.retrieval.retrieve import Retriever, VectorRetriever
 from core.workflow.chapter_tree import children, dominant_prefix, unique_chapters
 from core.workflow.query_decompose import QueryDecomposer
 from core.workflow.query_dimension import DimensionExtractor
+from core.workflow.query_gate import QueryGate
 from core.workflow.query_preprocess import QueryPreprocessor
+from core.workflow.answer_outliner import AnswerOutliner
 
 logger = logging.getLogger(__name__)
+
+
+class EmptySkeleton(Exception):
+    """AnswerOutliner 列不出骨架 → 由 explain_branch 落 agent 兜底。"""
 
 
 # ── 流式专用事件（仅 write_event_to_stream，不参与 step 图）──────────
@@ -69,6 +75,8 @@ class QaCapability:
         retriever: "Retriever | None" = None,
         probe_retriever: "Retriever | None" = None,
         probe_reranker: "Reranker | None" = None,
+        explain_retriever: "Retriever | None" = None,
+        explain_recall_k: int = 12,
     ):
         self.index_manager = index_manager
         self.llm = llm
@@ -85,7 +93,16 @@ class QaCapability:
         self.preprocessor = QueryPreprocessor(llm)
         self.decomposer = QueryDecomposer(llm)
         self.dimensioner = DimensionExtractor(llm)
+        # explain 专用：宽覆盖召回（hybrid + 大 top_k + 不重排，求覆盖不求精）
+        self.explain_retriever = explain_retriever or VectorRetriever()
+        self.explain_recall_k = explain_recall_k
+        self._gate = QueryGate(llm)
+        self.outliner = AnswerOutliner(llm)
         self._retrieve_concurrency = 4  # 扇出检索并发上限，防 embedding/BM25/rerank 打爆
+
+    async def gate(self, clean_query: str) -> tuple[str, str]:
+        """Call A：检索降噪 + 意图二判（explain / other）。委托 QueryGate。"""
+        return await self._gate.run(clean_query)
 
     # ── 预处理：降噪 + 难度/明确性分类（不再消指代）──────────────────
     async def classify(
@@ -195,6 +212,55 @@ class QaCapability:
         # 4) 逐维度检索 + 分节合成（与 split 共用 helper）
         sections = [(d.label, d.query) for d in dimensions]
         return await self._retrieve_and_concat(ctx, sections, book_titles, preamble)
+
+    async def explain(
+        self, ctx: Context, query: str, book_titles: Optional[list[str]]
+    ) -> tuple[str, list]:
+        """讲清楚：宽覆盖召回 → 列概念骨架 → 每节点检索 → 教学体分节合成。
+
+        空骨架 → raise EmptySkeleton（由 explain_branch 落 agent 兜底）。
+        广度从骨架节点数自然涌现（1 节=单轮、N 节=扇出），不预分类。
+        """
+        # 1. 宽覆盖召回（内部，不发流事件——空骨架时要静默落 agent，别先污染 UI）
+        located = await self._explain_recall(query, book_titles)
+        passages = [
+            (n.get_content() if hasattr(n, "get_content") else n.text)[:500]
+            for n in located
+        ]
+
+        # 2. 列骨架
+        sub_queries = await self.outliner.run(query, passages)
+        if not sub_queries:
+            raise EmptySkeleton(query)
+
+        # 3. 每节点检索（此时才发 RetrievalStart）
+        ctx.write_event_to_stream(RetrievalStartEvent(query=query))
+        retrieved = await self._retrieve_all(sub_queries, book_titles)
+        pool = self._merge_pool(retrieved)
+        ctx.write_event_to_stream(RetrievalDoneEvent(count=len(pool)))
+
+        # 4. 教学体合成：开场全景 → 逐节接地 → 收束（每段只从对应 chunk 出事实）
+        parts: list[str] = []
+        if pool:
+            intro = await self._synthesize_stream(
+                ctx, f"请用一段话总览，引出下面要分述的几个方面：{query}", pool
+            )
+            parts.append(intro)
+        for sub_q, ns in zip(sub_queries, retrieved):
+            h = f"\n\n## {sub_q}\n"
+            ctx.write_event_to_stream(AnswerDeltaEvent(delta=h))
+            body = (
+                await self._synthesize_stream(ctx, sub_q, ns)
+                if ns
+                else "（未检索到相关内容）"
+            )
+            parts.append(h + body)
+        if pool:
+            outro = await self._synthesize_stream(
+                ctx, f"请用一两句话小结上面关于「{query}」的内容", pool
+            )
+            parts.append("\n\n" + outro)
+        return "".join(parts).strip(), pool
 
     async def split(
         self, ctx: Context, query: str, book_titles: Optional[list[str]]
@@ -351,6 +417,13 @@ class QaCapability:
         """probe 探测召回：用独立的 probe_retriever/probe_reranker（默认 vector / 不重排）。"""
         return await self._retrieve_with(
             query, book_titles, self.probe_retriever, self.probe_reranker
+        )
+
+    async def _explain_recall(self, query: str, book_titles: Optional[list[str]]):
+        """explain 宽覆盖召回：hybrid + 大 top_k + 不重排（求"有哪几块"，不求精）。"""
+        return await self.explain_retriever.retrieve(
+            query, index_manager=self.index_manager,
+            book_titles=book_titles, top_k=self.explain_recall_k,
         )
 
     async def _retrieve_all(
