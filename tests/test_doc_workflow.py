@@ -50,7 +50,13 @@ class FakeMemory:
 
 
 def _wf(llm, index_manager=None):
-    return DocQueryWorkflow(index_manager=index_manager, llm=llm, similarity_top_k=3, timeout=10)
+    wf = DocQueryWorkflow(index_manager=index_manager, llm=llm, similarity_top_k=3, timeout=10)
+
+    async def _echo_other_gate(clean_query):
+        return clean_query, "other"            # 默认非 explain；explain 测试自行覆盖
+
+    wf.qa.gate = _echo_other_gate
+    return wf
 
 
 # ── 全链路 dispatch 接线 ──────────────────────────────────────────────
@@ -383,6 +389,37 @@ async def test_out_of_scope_responds_without_retrieval_or_clarify():
     assert result.metadata.get("category") == "out_of_scope"  # 分类回流 metadata
 
 
+async def test_explain_intent_routes_to_explain_branch():
+    # front_door dispatch_qa → preprocess → gate intent=explain → explain_branch（不进难度分类）
+    llm = FakeLLM(['{"action": "dispatch_qa", "clean_query": "讲讲MVCC"}'])  # 仅 front_door 调 LLM
+    wf = _wf(llm)
+    called = {"explain": False, "classify": False}
+
+    async def fake_gate(clean_query):
+        return clean_query, "explain"
+
+    async def fake_explain(ctx, query, book_titles):
+        called["explain"] = True
+        assert query == "讲讲MVCC"               # rewritten_query 来自 gate
+        return "教学体答案", ["n1"]
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        called["classify"] = True
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("retrievable", clean_query)
+
+    wf.qa.gate = fake_gate
+    wf.qa.explain = fake_explain
+    wf.qa.classify = fake_classify
+
+    result = await wf.run(query="讲讲MVCC", memory=FakeMemory())
+    assert called["explain"] is True
+    assert called["classify"] is False          # explain 跳过难度分类
+    assert str(result.response) == "教学体答案"
+    assert result.source_nodes == ["n1"]
+    assert llm.calls == 1                        # 只 front_door（gate/explain 都 stub）
+
+
 # ── reranker 名字 → 对象注入 QaCapability（装配单测）──────────────────
 class _StubIndexManager:
     pass
@@ -457,9 +494,9 @@ def test_probe_retriever_name_resolved_and_injected(monkeypatch):
     sentinels = {}
 
     def fake_make(name):
-        s = object()
-        sentinels[name] = s
-        return s
+        # 同名复用一个 sentinel：retriever 与 explain_retriever 都会解析 "hybrid"，
+        # 按名 memoize 才能让 wf.qa.retriever is sentinels["hybrid"] 成立。
+        return sentinels.setdefault(name, object())
 
     monkeypatch.setattr(mod, "make_retriever", fake_make)
 
