@@ -67,6 +67,8 @@ class QaCapability:
         reranker: "Reranker | None" = None,
         rerank_candidate_k: int = 20,
         retriever: "Retriever | None" = None,
+        probe_retriever: "Retriever | None" = None,
+        probe_reranker: "Reranker | None" = None,
     ):
         self.index_manager = index_manager
         self.llm = llm
@@ -76,6 +78,10 @@ class QaCapability:
         self.rerank_candidate_k = rerank_candidate_k
         # 检索不可跳过，基线=具体 VectorRetriever（不传即基线）
         self.retriever = retriever or VectorRetriever()
+        # probe（探测召回判类）的检索与答案检索解耦：probe 求覆盖信号、答案求精排。
+        # 默认 vector + 不重排（rerank 会收敛召回、压扁 pending_split 依赖的章节 spread 信号）。
+        self.probe_retriever = probe_retriever or VectorRetriever()
+        self.probe_reranker = probe_reranker
         self.preprocessor = QueryPreprocessor(llm)
         self.decomposer = QueryDecomposer(llm)
         self.dimensioner = DimensionExtractor(llm)
@@ -95,7 +101,7 @@ class QaCapability:
         retrieval_context = ""
         if probe:
             try:
-                located = await self._retrieve_nodes(clean_query, book_titles)
+                located = await self._probe_retrieve(clean_query, book_titles)
                 retrieval_context = self._format_probe(located, book_titles)
             except Exception as exc:
                 logger.warning("classify probe 探测失败，退回纯文本判定：%s", exc)
@@ -229,9 +235,11 @@ class QaCapability:
 
         # 综合型：扇出检索 → 去重合并 → 对原始问题一次整合合成（单子查询天然退化单轮）
         if mode == "synthesize":
+            logger.info("进入整合路线")
             return await self._retrieve_and_synthesize(ctx, query, sub_queries, book_titles)
 
         # 罗列型：逐项检索 + map-reduce 汇总（与 assume 共用同一 helper）
+        logger.info("进入罗列路线")
         sections = [(sq, sq) for sq in sub_queries]
         return await self._retrieve_and_concat(ctx, sections, book_titles)
 
@@ -322,16 +330,28 @@ class QaCapability:
         metas = data.get("metadatas") or []
         return unique_chapters(metas, book_titles[0])
 
-    async def _retrieve_nodes(self, query: str, book_titles: Optional[list[str]]):
+    async def _retrieve_with(self, query, book_titles, retriever, reranker):
         # 检索策略可插拔（默认 VectorRetriever=基线）；有 reranker 时过召回候选池再重排截断
-        fetch_k = self.rerank_candidate_k if self.reranker else self.similarity_top_k
-        nodes = await self.retriever.retrieve(
+        fetch_k = self.rerank_candidate_k if reranker else self.similarity_top_k
+        nodes = await retriever.retrieve(
             query, index_manager=self.index_manager,
             book_titles=book_titles, top_k=fetch_k,
         )
-        if self.reranker:
-            nodes = await self.reranker.rerank(query, nodes, self.similarity_top_k)
+        if reranker:
+            nodes = await reranker.rerank(query, nodes, self.similarity_top_k)
         return nodes
+
+    async def _retrieve_nodes(self, query: str, book_titles: Optional[list[str]]):
+        """答案检索：用注入的 retriever/reranker。"""
+        return await self._retrieve_with(
+            query, book_titles, self.retriever, self.reranker
+        )
+
+    async def _probe_retrieve(self, query: str, book_titles: Optional[list[str]]):
+        """probe 探测召回：用独立的 probe_retriever/probe_reranker（默认 vector / 不重排）。"""
+        return await self._retrieve_with(
+            query, book_titles, self.probe_retriever, self.probe_reranker
+        )
 
     async def _retrieve_all(
         self, sub_queries: list[str], book_titles: Optional[list[str]]

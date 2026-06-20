@@ -457,6 +457,61 @@ async def test_retrieve_nodes_retriever_overfetches_when_reranker_set():
     assert rr_ret.calls[0][2] == 5
 
 
+# ── probe 检索解耦：独立 retriever + reranker（默认 vector / 不重排）──────
+async def test_probe_retriever_defaults_to_vector_and_no_reranker():
+    from core.retrieval.retrieve import VectorRetriever
+    qa = QaCapability(FakeIndexManager(nodes=[]), FakeLLM())
+    assert isinstance(qa.probe_retriever, VectorRetriever)
+    assert qa.probe_reranker is None
+
+
+async def _run_classify(qa, query="openclaw", books=None):
+    async def fake_run(clean_query, retrieval_context=""):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("retrievable", clean_query)
+
+    qa.preprocessor.run = fake_run
+    return await qa.classify(query, books or ["openclaw"])
+
+
+async def test_classify_probe_uses_probe_retriever_not_answer():
+    answer_ret = _RecordingRetriever(nodes=[_PNode("答案侧片段")])
+    probe_ret = _RecordingRetriever(nodes=[_PNode("probe侧片段")])
+    qa = QaCapability(FakeIndexManager(nodes=[]), FakeLLM(),
+                      retriever=answer_ret, probe_retriever=probe_ret)
+
+    await _run_classify(qa)
+
+    assert len(probe_ret.calls) == 1   # probe 走独立 probe_retriever
+    assert answer_ret.calls == []      # 答案 retriever 不被 probe 触发
+
+
+async def test_classify_probe_does_not_rerank_by_default():
+    probe_ret = _RecordingRetriever(nodes=[_PNode("片段")])
+    answer_rr = _RecordingReranker()
+    qa = QaCapability(FakeIndexManager(nodes=[]), FakeLLM(),
+                      reranker=answer_rr,            # 答案侧有重排
+                      probe_retriever=probe_ret)     # probe 独立 retriever，默认不重排
+
+    await _run_classify(qa)
+
+    assert answer_rr.calls == []       # probe 默认不触发任何 rerank
+
+
+async def test_classify_probe_uses_probe_reranker_when_explicitly_given():
+    probe_ret = _RecordingRetriever(nodes=["a", "b", "c"])
+    probe_rr = _RecordingReranker()
+    qa = QaCapability(FakeIndexManager(nodes=[]), FakeLLM(),
+                      similarity_top_k=2, rerank_candidate_k=3,
+                      probe_retriever=probe_ret, probe_reranker=probe_rr)
+
+    await _run_classify(qa)
+
+    assert probe_ret.calls[0][2] == 3  # 有 probe reranker → 过召回候选池
+    assert len(probe_rr.calls) == 1
+    assert probe_rr.calls[0][2] == 2   # 截回 similarity_top_k
+
+
 import asyncio
 
 
