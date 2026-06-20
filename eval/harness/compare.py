@@ -7,6 +7,8 @@
 import argparse
 import asyncio
 import os
+import sys
+import time
 
 from eval.harness.report import (
     default_result_paths,
@@ -17,14 +19,19 @@ from eval.harness.report import (
 
 # 变体矩阵：baseline 全单轮，逐个打开决策
 VARIANTS = {
-    "baseline(全单轮)": dict(probe_then_classify=False, split_enabled=False,
-                             assume_enabled=False, other_agent_enabled=False),
+    "baseline": dict(probe_then_classify=False, split_enabled=False,
+                             assume_enabled=False, other_agent_enabled=False), #全单轮
     "+probe": dict(probe_then_classify=True, split_enabled=False,
                    assume_enabled=False, other_agent_enabled=False),
     "+probe+split": dict(probe_then_classify=True, split_enabled=True,
                          assume_enabled=False, other_agent_enabled=False),
     "全开": dict(probe_then_classify=True, split_enabled=True,
                  assume_enabled=True, other_agent_enabled=True),
+    # 单变量隔离 probe 检索：相对「全开」只把 probe 切到 hybrid（答案仍 vector），
+    # 看分类准确率列的 delta = probe 用 hybrid vs 默认 vector 值多少。
+    "全开+probe-hybrid": dict(probe_then_classify=True, split_enabled=True,
+                              assume_enabled=True, other_agent_enabled=True,
+                              probe_retriever="hybrid"),
     "全开+rerank": dict(probe_then_classify=True, split_enabled=True,
                         assume_enabled=True, other_agent_enabled=True,
                         reranker="bge-reranker-v2-m3"),
@@ -34,6 +41,9 @@ VARIANTS = {
     "全开+hybrid+rerank": dict(probe_then_classify=True, split_enabled=True,
                                assume_enabled=True, other_agent_enabled=True,
                                retriever="hybrid", reranker="bge-reranker-v2-m3"),
+    "all": dict(probe_then_classify=True, split_enabled=True,
+                               assume_enabled=True, other_agent_enabled=True,
+                               retriever="hybrid", reranker="bge-reranker-v2-m3",probe_retriever="hybrid"),#全开+hybrid+rerank+probe-hybrid
 }
 
 # agent 自主规划路线：另一个 SUT 类（非 flags 组合）。值置 None 作哨兵，
@@ -59,7 +69,7 @@ def resolve_baseline(baseline: str, variant_names: list[str]) -> str:
     return baseline if baseline in variant_names else (variant_names[0] if variant_names else baseline)
 
 
-async def _run_variants(testset_path, limit, names):
+async def _run_variants(testset_path, limit, names, concurrency: int = 1):
     from eval.config import CHROMA_DIR, make_eval_embeddings, make_eval_llm
     from eval.harness.metrics import build_metric_specs
     from eval.harness.meter import attach_token_meter
@@ -80,19 +90,77 @@ async def _run_variants(testset_path, limit, names):
 
     variants = []
     detail = []  # 每条明细（带 variant 列），供 --detail 落盘
-    for name in names:
+    total = len(rows)
+    concurrency = max(1, concurrency)
+    for vi, name in enumerate(names, 1):
         sut = build_sut(name, index_manager, sut_llm)
-        scored = [await score_row(r, sut, metric_specs, meter=meter) for r in rows]
+        # 进度走 stderr：每条 query 是真实 LLM 调用（慢），逐行刷新让控制台看得见进展，
+        # 同时不污染 stdout 的 markdown 对比表。
+        print(f"[变体 {vi}/{len(names)}] {name}（{total} 条, 并发 {concurrency}）",
+              file=sys.stderr, flush=True)
+        t0 = time.monotonic()
+        if concurrency == 1:
+            scored = await _score_rows_serial(rows, sut, metric_specs, meter, total, t0)
+        else:
+            # 并行：逐行 token 计量在并发下会串扰（meter 是 SUT llm 上的单个全局计数器），
+            # 故跑前 reset 一次、跑完 read 一次取「变体级总量」，逐行不再单独计 token。
+            scored = await _score_rows_parallel(
+                rows, sut, metric_specs, meter, total, t0, concurrency
+            )
         for s in scored:
             detail.append({"variant": name, **s})
         variants.append({"name": name, "report": aggregate(scored)})
     return variants, detail
 
 
+def _progress(done: int, total: int, t0: float) -> None:
+    elapsed = time.monotonic() - t0
+    print(f"\r  {done}/{total}  ({elapsed:.0f}s, 均 {elapsed / done:.1f}s/条)",
+          end="", file=sys.stderr, flush=True)
+
+
+async def _score_rows_serial(rows, sut, metric_specs, meter, total, t0):
+    """串行：保留逐行 token 计量（meter reset/read 在 score_row 内、单行独占无串扰）。"""
+    from eval.harness.run_eval import score_row
+
+    scored = []
+    for ri, r in enumerate(rows, 1):
+        scored.append(await score_row(r, sut, metric_specs, meter=meter))
+        _progress(ri, total, t0)
+    print(file=sys.stderr, flush=True)  # 收尾换行，避免下个变体覆盖在同一行
+    return scored
+
+
+async def _score_rows_parallel(rows, sut, metric_specs, meter, total, t0, concurrency):
+    """并行：信号量限流 gather；逐行不计 token，变体跑完打印一次总量。"""
+    from eval.harness.run_eval import score_row
+
+    meter.reset()
+    sem = asyncio.Semaphore(concurrency)
+    done = 0
+
+    async def _one(r):
+        nonlocal done
+        async with sem:
+            res = await score_row(r, sut, metric_specs, meter=None)
+        done += 1
+        _progress(done, total, t0)
+        return res
+
+    scored = await asyncio.gather(*(_one(r) for r in rows))  # 结果按入参序，进度按完成序
+    tok = meter.read()
+    print(f"\n  变体 token 总量(并发，不逐行归因): {tok['total_tokens']}",
+          file=sys.stderr, flush=True)
+    return scored
+
+
 def main():
     p = argparse.ArgumentParser(description="决策对比评测（ablation）")
     p.add_argument("--testset", required=True, help="测试集 jsonl（建议金标准 golden.jsonl）")
     p.add_argument("--limit", type=int, default=None, help="只跑前 N 条")
+    p.add_argument("--concurrency", type=int, default=1,
+                   help="每个变体内并发跑多少条 query（默认 1=串行，保留逐行 token 计量；"
+                        ">1 提速但 token 仅给变体级总量，遇限流(429)调小）")
     p.add_argument("--variants", nargs="+",
                    default=[n for n in VARIANTS if n != AGENT_VARIANT],
                    choices=list(VARIANTS.keys()),
@@ -104,7 +172,9 @@ def main():
                    help="每条明细 CSV 落盘路径；缺省 eval/results/compare_<时间戳>_detail.csv")
     args = p.parse_args()
     args.baseline = resolve_baseline(args.baseline, args.variants)
-    variants, detail = asyncio.run(_run_variants(args.testset, args.limit, args.variants))
+    variants, detail = asyncio.run(
+        _run_variants(args.testset, args.limit, args.variants, args.concurrency)
+    )
     table = render_delta_table(variants, baseline=args.baseline)
     print(table)
 

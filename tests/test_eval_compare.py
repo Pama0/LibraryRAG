@@ -49,7 +49,7 @@ def test_build_sut_agent_variant_returns_agent_system():
 
 
 def test_build_sut_workflow_variant_returns_workflow_system():
-    sut = build_sut("baseline(全单轮)", index_manager=object(), llm=object())
+    sut = build_sut("baseline", index_manager=object(), llm=object())
     assert isinstance(sut, DocQueryWorkflowSystem)
 
 
