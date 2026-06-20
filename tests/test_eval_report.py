@@ -59,16 +59,18 @@ def test_write_detail_csv_includes_cost_columns(tmp_path):
 
 
 def test_default_result_paths_prefix_and_stamp():
+    import os
     now = datetime(2026, 6, 18, 13, 0, 0)
     md, detail = default_result_paths(prefix="run_eval", now=now)
-    assert md.endswith("run_eval_20260618_130000.md")
-    assert detail.endswith("run_eval_20260618_130000_detail.csv")
+    assert md.endswith(os.path.join("20260618_130000", "run_eval.md"))
+    assert detail.endswith(os.path.join("20260618_130000", "run_eval_detail.csv"))
 
 
 def test_default_result_paths_defaults_to_compare_prefix():
+    import os
     now = datetime(2026, 6, 18, 13, 0, 0)
     md, _ = default_result_paths(now=now)
-    assert md.endswith("compare_20260618_130000.md")
+    assert md.endswith(os.path.join("20260618_130000", "compare.md"))
 
 
 # ── write_detail_csv：写出 variant + match 列（match=实判 vs 金标准一致）──

@@ -62,15 +62,16 @@ _RESULT_DIR = os.path.join("eval", "results")
 
 
 def default_result_paths(prefix: str = "compare", now: "datetime | None" = None) -> tuple[str, str]:
-    """缺省落盘路径：eval/results/<prefix>_<时间戳>.{md,_detail.csv}。
+    """缺省落盘路径：eval/results/<时间戳>/<prefix>.{md,_detail.csv}。
 
-    文件名带秒级时间戳 → 每次运行不覆盖上一次（md 对比表 + csv 明细同戳配对）。
+    每次运行一个秒级时间戳子文件夹 → 不覆盖上一次，且 md 对比表 + csv 明细同处便于归档。
     prefix 区分来源：compare（多变体）/ run_eval（单系统）。
     """
     stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(_RESULT_DIR, stamp)
     return (
-        os.path.join(_RESULT_DIR, f"{prefix}_{stamp}.md"),
-        os.path.join(_RESULT_DIR, f"{prefix}_{stamp}_detail.csv"),
+        os.path.join(run_dir, f"{prefix}.md"),
+        os.path.join(run_dir, f"{prefix}_detail.csv"),
     )
 
 
