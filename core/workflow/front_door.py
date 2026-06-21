@@ -45,6 +45,7 @@ _FRONT_DOOR_PROMPT = """你是知识库助手的对话门口。对下面的 quer
 第二步 选出口（四选一，基于会话状态判断，不要自己回答任何知识内容）：
 - dispatch_qa：对已入库书籍/文档内容的【具体知识提问】。把净化后的自包含问句放进 clean_query。
   铁律：凡承载知识的具体提问，哪怕你自己知道答案，也绝不在这里作答——一律 dispatch_qa 交检索系统按知识库回答。
+  纠偏：若用户明确要求【在所有书/全部书里】或【不要限定范围】回答，置 disable_scope=true（仅 dispatch_qa 有意义；默认 false，不要随意置 true）。
 - dispatch_study_plan：要求基于某本书生成学习计划/学习路线。clean_query 放净化后的请求。
 - converse：寒暄/问候/致谢/闲聊、问你是谁或能做什么这类元问题，以及【对上一轮回答的反馈、质疑、不满、调侃】（如"你逗我呢""为什么答不了""不对吧"——参考对话历史里上一轮系统的回复来判断）。reply 放面向用户的自然回复；若上一轮是拒答/没答好而本轮是不满，先如实承认再引导。
   【元工具（仅 converse 路径可用）】若本轮是关于知识库藏书的元查询（"库里有什么""有 MySQL 的书吗""多少本"等），设 tool="list_books" + tool_filter（书名子串，大小写不敏感，如"mysql"；无过滤留空）+ tool_count_only（只要计数时 true，列清单时 false），reply 留空（系统查库后另行组织）。纯寒暄/反馈/无需库藏数据时 tool="" 照常填 reply。
@@ -54,7 +55,7 @@ _FRONT_DOOR_PROMPT = """你是知识库助手的对话门口。对下面的 quer
 判断本轮与上一轮的关系，以【对话历史】为准，别只看这句话的字面。
 
 只返回 JSON，不要其它任何内容：
-{"action":"dispatch_qa / dispatch_study_plan / converse / clarify","clean_query":"净化后的自包含 query（dispatch 时填）","reply":"面向用户的话（converse/clarify 且无需工具时填）","reason":"简短理由","tool":"list_books 或空串（仅 converse 元查询时填 list_books）","tool_filter":"书名子串过滤（tool=list_books 时填，无过滤留空）","tool_count_only":false}
+{"action":"dispatch_qa / dispatch_study_plan / converse / clarify","clean_query":"净化后的自包含 query（dispatch 时填）","reply":"面向用户的话（converse/clarify 且无需工具时填）","reason":"简短理由","tool":"list_books 或空串（仅 converse 元查询时填 list_books）","tool_filter":"书名子串过滤（tool=list_books 时填，无过滤留空）","tool_count_only":false,"disable_scope":false}
 
 对话历史：
 {history}
@@ -91,6 +92,7 @@ class FrontDoorDecision:
     tool: str = ""
     tool_filter: str = ""
     tool_count_only: bool = False
+    disable_scope: bool = False
 
 
 class FrontDoorDecisionModel(BaseModel):
@@ -107,6 +109,7 @@ class FrontDoorDecisionModel(BaseModel):
     tool: Literal["list_books", ""] = Field(default="", description="converse 元工具，仅 list_books")
     tool_filter: str = Field(default="", description="书名子串过滤，大小写不敏感")
     tool_count_only: bool = Field(default=False, description="只要计数时 true")
+    disable_scope: bool = Field(default=False, description="用户要求全库/不限定时 true（仅 dispatch_qa 有意义）")
 
 
 def _strip_fences(text: str) -> str:
@@ -184,7 +187,10 @@ class FrontDoorAgent:
                 logger.info(
                     "front_door: action=%s clean_query=%r", d.action, clean[:80]
                 )
-                return FrontDoorDecision(d.action, clean_query=clean, reason=d.reason)
+                return FrontDoorDecision(
+                    d.action, clean_query=clean, reason=d.reason,
+                    disable_scope=d.disable_scope,
+                )
             if d.action == "clarify":
                 reply = (d.reply or "").strip() or _FALLBACK_REPLY
                 logger.info("front_door: action=clarify")

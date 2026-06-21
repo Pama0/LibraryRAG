@@ -211,9 +211,12 @@ class DocQueryWorkflow(Workflow):
             return DirectReplyEvent(reply=decision.reply, action=decision.action)
         # dispatch_qa（含降级）—— memory/book_titles 在 route 顶部已取
         await ctx.store.set("clean_query", decision.clean_query)
-        scope = await self.scoper.run(decision.clean_query, book_titles, memory)
-        await ctx.store.set("book_titles", scope.effective_book_titles or book_titles)
-        await ctx.store.set("scope_note", scope.note)
+        if not decision.disable_scope:
+            scope = await self.scoper.run(decision.clean_query, book_titles, memory)
+            await ctx.store.set("book_titles", scope.effective_book_titles or book_titles)
+            await ctx.store.set("scope_note", scope.note)
+        else:
+            await ctx.store.set("scope_note", "")
         return PreprocessEvent()
 
     # ── QA 内部预处理：委托 QA capability 做降噪 + 难度分类，据 category dispatch。 ──

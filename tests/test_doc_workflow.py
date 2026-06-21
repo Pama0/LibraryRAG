@@ -885,6 +885,31 @@ async def test_scope_note_prepended_to_answer():
     assert "正文答案" in resp
 
 
+async def test_disable_scope_skips_scoper():
+    llm = FakeLLM(['{"action":"dispatch_qa","clean_query":"讲一下gateway","disable_scope":true}'])
+    wf = _wf(llm)
+
+    async def boom_scope(*a, **k):
+        raise AssertionError("disable_scope=true 时不应调用 scoper")
+    wf.scoper.run = boom_scope
+
+    captured = {}
+
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
+        captured["book_titles"] = book_titles
+        return "答案", []
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("retrievable")
+
+    wf.qa.retrieve = fake_retrieve
+    wf.qa.classify = fake_classify
+
+    await wf.run(query="在所有书里讲一下gateway", memory=FakeMemory())
+    assert captured["book_titles"] is None        # 跳过收窄，保持全库
+
+
 async def test_no_scope_note_when_not_narrowed():
     llm = FakeLLM(['{"action":"dispatch_qa","clean_query":"讲一下gateway"}'])
     wf = _wf(llm)

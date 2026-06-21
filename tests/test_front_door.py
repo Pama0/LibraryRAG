@@ -306,6 +306,19 @@ async def test_front_door_prompt_guards_proper_nouns():
     assert "OpenCL" in p            # openclaw→OpenCL 形近误改反例写进 prompt
 
 
+async def test_front_door_sets_disable_scope_on_all_books_request():
+    llm = FakeLLM(['{"action":"dispatch_qa","clean_query":"讲一下gateway","disable_scope":true}'])
+    d = await _agent(llm).run("在所有书里讲一下gateway")
+    assert d.action == "dispatch_qa"
+    assert d.disable_scope is True
+
+
+async def test_front_door_disable_scope_defaults_false():
+    llm = FakeLLM(['{"action":"dispatch_qa","clean_query":"讲一下gateway"}'])
+    d = await _agent(llm).run("讲一下gateway")
+    assert d.disable_scope is False
+
+
 async def test_front_door_prompt_has_tool_definition_and_redline():
     llm = FakeLLM(['{"action":"converse","tool":"","reply":"hi"}'])
     await _agent_with_lib(llm, []).run("你好")
