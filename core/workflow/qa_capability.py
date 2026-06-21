@@ -138,6 +138,7 @@ class QaCapability:
         probe_reranker: "Reranker | None" = None,
         explain_retriever: "Retriever | None" = None,
         explain_recall_k: int = 12,
+        simple_escalate_min_score: float = 0.0,
     ):
         self.index_manager = index_manager
         self.llm = llm
@@ -157,6 +158,7 @@ class QaCapability:
         # explain 专用：宽覆盖召回（hybrid + 大 top_k + 不重排，求覆盖不求精）
         self.explain_retriever = explain_retriever or VectorRetriever()
         self.explain_recall_k = explain_recall_k
+        self.simple_escalate_min_score = simple_escalate_min_score
         self._gate = QueryGate(llm)
         self.admitter = Admitter(llm)
         self.outliner = AnswerOutliner(llm)
@@ -229,6 +231,39 @@ class QaCapability:
             )
         result = await self.classifier.run(q, evidence)
         return _SubDecision(q, "ok", category=result.category, reason=result.reason)
+
+    def _evidence_weak(self, nodes: list) -> bool:
+        """simple 安全网触发判据：召回空 / top-1 分数低于阈值（complex 误判成 simple 时升级）。"""
+        if not nodes:
+            return True
+        top = max((getattr(n, "score", 0) or 0) for n in nodes)
+        return top < self.simple_escalate_min_score
+
+    async def _execute_subq(
+        self, ctx: Context, q: str, category: str, book_titles: Optional[list[str]]
+    ) -> tuple[str, list]:
+        """按 category 分派执行；simple 证据不足升级 agent，complex agent 异常降级单轮。"""
+        if category == "explain":
+            return await self.explain(ctx, q, book_titles)
+        if category == "compare":
+            return await self.assume(ctx, q, book_titles)
+        if category == "complex":
+            if self.qa_agent is None:
+                return await self.retrieve(ctx, q, book_titles)
+            try:
+                return await self.qa_agent.run(ctx, q, book_titles)
+            except Exception as exc:
+                logger.warning("complex agent 失败，降级单轮：%s", exc)
+                return await self.retrieve(ctx, q, book_titles)
+        # simple（含分类降级）：先单轮检索+合成，证据不足且有 agent → 升级覆盖
+        answer, nodes = await self.retrieve(ctx, q, book_titles)
+        if self._evidence_weak(nodes) and self.qa_agent is not None:
+            logger.info("simple 证据不足，升级 agent：%r", q[:60])
+            try:
+                return await self.qa_agent.run(ctx, q, book_titles)
+            except Exception as exc:
+                logger.warning("simple 升级 agent 失败，回落单轮：%s", exc)
+        return answer, nodes
 
     def _format_probe(self, nodes: list, book_titles) -> str:
         """探测召回 → 喂 judge 的信号：命中数 + 章节分布 + top 截断片段。"""

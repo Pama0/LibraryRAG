@@ -1128,3 +1128,61 @@ async def test_decide_subq_ok_runs_classifier():
     d = await qa._decide_subq("MySQL默认隔离级别有哪些并发问题", None)
     assert d.verdict == "ok"
     assert d.category == "complex"
+
+
+class _FakeAgent:
+    def __init__(self, answer="AGENT答案", nodes=None):
+        self._a = answer
+        self._n = nodes or ["an"]
+        self.called_with = None
+    async def run(self, ctx, q, bt):
+        self.called_with = q
+        return self._a, self._n
+
+
+async def test_execute_simple_with_enough_evidence_uses_retrieve():
+    qa = _qa()
+    async def fake_retrieve(ctx, q, bt, preamble=""):
+        return "单轮答案", ["n1", "n2"]
+    qa.retrieve = fake_retrieve
+    qa.qa_agent = _FakeAgent()
+    ans, nodes = await qa._execute_subq(FakeCtx(), "MySQL有哪些锁", "simple", None)
+    assert ans == "单轮答案"
+    assert qa.qa_agent.called_with is None  # 没升级
+
+
+async def test_execute_simple_weak_evidence_escalates_to_agent():
+    qa = _qa()
+    async def fake_nodes(q, bt): return []   # 召回空 = 证据不足
+    qa._retrieve_nodes = fake_nodes
+    qa.qa_agent = _FakeAgent(answer="AGENT答案")
+    ans, nodes = await qa._execute_subq(FakeCtx(), "冷门问题", "simple", None)
+    assert ans == "AGENT答案"
+    assert qa.qa_agent.called_with == "冷门问题"
+
+
+async def test_execute_complex_uses_agent():
+    qa = _qa()
+    qa.qa_agent = _FakeAgent(answer="AGENT答案")
+    ans, nodes = await qa._execute_subq(FakeCtx(), "怎么优化MySQL", "complex", None)
+    assert ans == "AGENT答案"
+
+
+async def test_execute_complex_agent_none_degrades_single_retrieve():
+    qa = _qa()
+    qa.qa_agent = None
+    async def fake_retrieve(ctx, q, bt, preamble=""): return "降级单轮", ["n"]
+    qa.retrieve = fake_retrieve
+    ans, nodes = await qa._execute_subq(FakeCtx(), "怎么优化MySQL", "complex", None)
+    assert ans == "降级单轮"
+
+
+async def test_execute_explain_and_compare_route():
+    qa = _qa()
+    async def fake_explain(ctx, q, bt): return "讲解答案", ["e"]
+    async def fake_assume(ctx, q, bt): return "比较答案", ["c"]
+    qa.explain = fake_explain
+    qa.assume = fake_assume
+    a1, _ = await qa._execute_subq(FakeCtx(), "讲讲索引", "explain", None)
+    a2, _ = await qa._execute_subq(FakeCtx(), "A和B区别", "compare", None)
+    assert a1 == "讲解答案" and a2 == "比较答案"
