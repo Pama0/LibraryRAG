@@ -1188,3 +1188,37 @@ async def test_execute_explain_and_compare_route():
     a1, _ = await qa._execute_subq(FakeCtx(), "讲讲索引", "explain", None)
     a2, _ = await qa._execute_subq(FakeCtx(), "A和B区别", "compare", None)
     assert a1 == "讲解答案" and a2 == "比较答案"
+
+
+async def test_execute_simple_retrieves_exactly_once_through_real_retrieve():
+    # 锁"单次检索"不变量：simple 取一次节点，real retrieve 复用 nodes、不再二次检索
+    qa = _qa()
+    calls = {"n": 0}
+    async def counting_nodes(q, bt):
+        calls["n"] += 1
+        return ["n1", "n2"]            # 非空 → 不弱 → 复用路径
+    qa._retrieve_nodes = counting_nodes
+    async def fake_synth(ctx, query, nodes):
+        return "合成答案"
+    qa._synthesize_stream = fake_synth   # real retrieve 会调它，避免真 LLM
+    qa.qa_agent = _FakeAgent()
+    ans, nodes = await qa._execute_subq(FakeCtx(), "MySQL有哪些锁", "simple", None)
+    assert ans == "合成答案"
+    assert nodes == ["n1", "n2"]
+    assert calls["n"] == 1               # 单次检索（real retrieve 通过 nodes= 复用）
+    assert qa.qa_agent.called_with is None
+
+
+async def test_execute_simple_escalation_exception_falls_back_to_retrieve():
+    # agent 升级抛错 → except → 回落单轮（复用已取 nodes）
+    qa = _qa()
+    async def empty_nodes(q, bt): return []   # 空召回 → 弱 → 触发升级
+    qa._retrieve_nodes = empty_nodes
+    class _BoomAgent:
+        async def run(self, ctx, q, bt): raise RuntimeError("agent boom")
+    qa.qa_agent = _BoomAgent()
+    async def fake_retrieve(ctx, q, bt, preamble="", nodes=None):
+        return "回落单轮", (nodes if nodes is not None else [])
+    qa.retrieve = fake_retrieve
+    ans, nodes = await qa._execute_subq(FakeCtx(), "冷门问题", "simple", None)
+    assert ans == "回落单轮"
