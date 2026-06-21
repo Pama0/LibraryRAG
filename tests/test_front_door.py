@@ -294,6 +294,18 @@ async def test_dispatch_qa_ignores_tool_field():
     assert llm.calls == 1                    # 不调 2nd
 
 
+async def test_front_door_prompt_guards_proper_nouns():
+    """规范化不得把库内专名当形近错字改写（openclaw → OpenCL 回归防护）。
+
+    专名保护是 prompt 层的铁律——LLM 行为本身需真 LLM 验，单测只断言铁律进了 prompt。
+    """
+    llm = FakeLLM(['{"action":"dispatch_qa","clean_query":"讲讲openclaw"}'])
+    await _agent(llm).run("讲讲openclaw")
+    p = llm.prompts[0]
+    assert "专名" in p              # 专名保护铁律进 prompt
+    assert "OpenCL" in p            # openclaw→OpenCL 形近误改反例写进 prompt
+
+
 async def test_front_door_prompt_has_tool_definition_and_redline():
     llm = FakeLLM(['{"action":"converse","tool":"","reply":"hi"}'])
     await _agent_with_lib(llm, []).run("你好")
