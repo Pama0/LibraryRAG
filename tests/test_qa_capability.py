@@ -1288,3 +1288,20 @@ async def test_answer_all_out_of_scope_pure_refusal():
     ans, nodes, meta = await qa.answer(FakeCtx(), "PG的MVCC", None)
     assert ans == REFUSAL_TEXT
     assert nodes == []
+
+
+async def test_answer_multi_streams_match_returned_text():
+    # answer 自身流式的标题/末尾必须与返回文本一致（防 streamed-vs-returned 分叉）
+    from core.workflow.qa_capability import _SubDecision
+    ds = [_SubDecision("MySQL锁", "ok", category="simple"),
+          _SubDecision("OpenCL的session", "out_of_scope", reason="库外")]
+    qa = _qa_answer_stub(ds, {"MySQL锁": ("锁有X", ["a"])})
+    ctx = FakeCtx()
+    ans, _, _ = await qa.answer(ctx, "MySQL锁和OpenCL的session", None)
+    streamed = [e.delta for e in ctx.events if isinstance(e, AnswerDeltaEvent)]
+    assert streamed                                   # 标题/末尾被流式
+    # 返回文本被 strip，所以流式内容（可能带 \n）需要 strip 后再比对
+    for d in streamed:
+        assert d.strip() in ans                      # 每段流式内容都在返回文本里
+    assert any("## MySQL锁" in d for d in streamed)    # ok 子问题分节标题被流式
+    assert any("OpenCL的session" in d for d in streamed)  # 末尾"不在库"提示被流式

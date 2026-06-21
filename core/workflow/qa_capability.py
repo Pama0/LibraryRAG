@@ -318,7 +318,7 @@ class QaCapability:
             all_nodes.extend(nodes)
 
         # 末尾装饰：out_of_scope / missing_info 子问题（仅多问题且存在时）
-        tail = self._compose_tail(oos, missing)
+        tail = self._compose_tail(oos, missing) if multi else ""
         if tail:
             ctx.write_event_to_stream(AnswerDeltaEvent(delta=tail))
             parts.append(tail)
