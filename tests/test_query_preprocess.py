@@ -51,13 +51,6 @@ async def test_run_classifies_ambiguous_with_reason():
     assert result.reason == "缺评价维度"
 
 
-async def test_run_classifies_missing_info():
-    llm = FakeLLM(['{"category": "missing_info", "rewritten_query": "这个索引的应用场景", "reason": "指代不明"}'])
-    result = await _pp(llm).run("这个索引的应用场景")
-    assert result.category == "missing_info"
-    assert result.reason == "指代不明"
-
-
 async def test_run_falls_back_to_retrievable_on_parse_failure(caplog):
     import logging
     llm = FakeLLM(["这不是JSON"])
@@ -88,15 +81,6 @@ async def test_run_takes_clean_query_and_retrieval_context_no_memory():
     params = list(inspect.signature(QueryPreprocessor.run).parameters)
     assert params == ["self", "clean_query", "retrieval_context"]
     assert "memory" not in params
-
-
-async def test_run_missing_info_carries_clarify_question():
-    llm = FakeLLM([
-        '{"category": "missing_info", "rewritten_query": "这个索引的应用场景", "reason": "指代不明", "clarify_question": "你说的「这个索引」指哪一个？B+树索引还是全文索引？"}'
-    ])
-    result = await _pp(llm).run("这个索引的应用场景")
-    assert result.category == "missing_info"
-    assert result.clarify_question == "你说的「这个索引」指哪一个？B+树索引还是全文索引？"
 
 
 async def test_run_clarify_question_defaults_empty_when_absent():
@@ -130,20 +114,35 @@ async def test_run_without_retrieval_context_still_works():
     assert result.category == "retrievable"
 
 
-async def test_run_classifies_out_of_scope():
-    # 库外：问题清晰但探测召回片段与主题无关（库里没有该主题）
-    llm = FakeLLM([
-        '{"category": "out_of_scope", "rewritten_query": "PostgreSQL的MVCC是怎么实现的", "reason": "库外，召回片段均不相关"}'
-    ])
-    result = await _pp(llm).run("PostgreSQL的MVCC是怎么实现的")
-    assert result.category == "out_of_scope"
-    assert result.reason == "库外，召回片段均不相关"
+async def test_run_slim_rejects_out_of_scope_after_extract():
+    # 瘦身后 out_of_scope 不在枚举内 → Pydantic 拒 → 降级 retrievable
+    llm = FakeLLM(['{"category": "out_of_scope", "rewritten_query": "PostgreSQL的MVCC"}'])
+    result = await _pp(llm).run("PostgreSQL的MVCC")
+    assert result.category == "retrievable"
 
 
-async def test_run_accepts_out_of_scope_in_schema():
-    # out_of_scope 必须在 Literal 枚举内，不能被 Pydantic 当非法值降级
-    llm = FakeLLM([
-        '{"category": "out_of_scope", "rewritten_query": "MongoDB分片"}'
-    ])
-    result = await _pp(llm).run("MongoDB分片")
-    assert result.category == "out_of_scope"   # 未被降级成 retrievable
+async def test_run_slim_rejects_missing_info_after_extract():
+    # 瘦身后 missing_info 不在枚举内 → Pydantic 拒 → 降级 retrievable
+    llm = FakeLLM(['{"category": "missing_info", "rewritten_query": "这个索引"}'])
+    result = await _pp(llm).run("这个索引")
+    assert result.category == "retrievable"
+
+
+async def test_run_prompt_slim_has_no_out_of_scope_section():
+    llm = FakeLLM(['{"category": "retrievable", "rewritten_query": "MySQL锁"}'])
+    await _pp(llm).run("MySQL锁")
+    p = llm.prompts[0]
+    assert "out_of_scope（库外）" not in p          # 类定义段被删
+    assert "missing_info（信息不足）" not in p      # 类定义段被删
+    # 4 类仍在
+    assert "retrievable" in p and "pending_split" in p
+    assert "ambiguous" in p and "other" in p
+
+
+async def test_run_prompt_slim_enum_line_lists_four_classes():
+    llm = FakeLLM(['{"category": "retrievable", "rewritten_query": "MySQL锁"}'])
+    await _pp(llm).run("MySQL锁")
+    p = llm.prompts[0]
+    # 末尾枚举约束行应只列 4 类
+    assert "retrievable|pending_split|ambiguous|other" in p
+    assert "out_of_scope" not in p and "missing_info" not in p
