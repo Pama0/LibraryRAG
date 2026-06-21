@@ -1,6 +1,7 @@
 from llama_index.core.tools import FunctionTool
 
 from core.agent.tools import register_tool, ToolContext
+from core.rag.inventory import list_books_text
 
 
 @register_tool
@@ -15,18 +16,7 @@ class ListBooksTool:
         self.ctx = ctx
 
     def __call__(self) -> str:
-        data = self.ctx.index_manager.chroma_collection.get(include=["metadatas"])
-        counts: dict[str, int] = {}
-        for meta in data.get("metadatas", []) or []:
-            title = (meta or {}).get("book_title")
-            if not title:
-                continue
-            counts[title] = counts.get(title, 0) + 1
-        if not counts:
-            return "知识库当前为空。"
-        return "已入库书籍：\n" + "\n".join(
-            f"- 《{t}》（{c} 块）" for t, c in sorted(counts.items())
-        )
+        return list_books_text(self.ctx.index_manager)
 
     def to_function_tool(self) -> FunctionTool:
         return FunctionTool.from_defaults(
