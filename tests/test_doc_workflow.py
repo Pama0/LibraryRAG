@@ -584,3 +584,132 @@ def test_probe_reranker_name_resolved_and_injected(monkeypatch):
 
     assert wf.qa.probe_reranker is sentinels["bge-reranker-v2-m3"]
 
+
+# ── explain_branch：catch OutOfScope/MissingInfo + EmptySkeleton 仍落 agent（Task 6）──
+from core.workflow.qa_capability import (
+    EmptySkeleton, OutOfScope, MissingInfo, REFUSAL_TEXT, REFUSAL_FALLBACK,
+)
+
+
+async def test_explain_out_of_scope_refuses_with_category():
+    # explain admit 判库外 → 抛 OutOfScope → explain_branch 拒答 + category=out_of_scope
+    llm = FakeLLM(['{"action": "dispatch_qa", "clean_query": "PostgreSQL的MVCC"}'])
+    wf = _wf(llm)
+
+    async def fake_gate(clean_query):
+        return clean_query, "explain"
+
+    async def fake_explain(ctx, query, book_titles):
+        raise OutOfScope(query)
+
+    async def fake_agent(ctx, query, book_titles):
+        raise AssertionError("agent 不应被调用（库外应直接拒答）")
+
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
+        raise AssertionError("retrieve 不应被调用")
+
+    wf.qa.gate = fake_gate
+    wf.qa.explain = fake_explain
+    wf.qa_agent.run = fake_agent
+    wf.qa.retrieve = fake_retrieve
+
+    result = await wf.run(query="PostgreSQL的MVCC", memory=FakeMemory())
+    assert str(result.response) == REFUSAL_TEXT
+    assert result.source_nodes == []
+    assert result.metadata.get("category") == "out_of_scope"
+    assert result.metadata.get("intent") == "explain"
+
+
+async def test_explain_missing_info_clarifies_with_category():
+    # explain admit 判信息不足 → 抛 MissingInfo(反问) → explain_branch 反问 + category=missing_info
+    llm = FakeLLM(['{"action": "dispatch_qa", "clean_query": "这个索引的应用场景"}'])
+    wf = _wf(llm)
+
+    async def fake_gate(clean_query):
+        return clean_query, "explain"
+
+    async def fake_explain(ctx, query, book_titles):
+        raise MissingInfo("你说的「这个索引」指哪一个？B+树还是全文索引？")
+
+    async def fake_agent(ctx, query, book_titles):
+        raise AssertionError("agent 不应被调用（信息不足应直接反问）")
+
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
+        raise AssertionError("retrieve 不应被调用")
+
+    wf.qa.gate = fake_gate
+    wf.qa.explain = fake_explain
+    wf.qa_agent.run = fake_agent
+    wf.qa.retrieve = fake_retrieve
+
+    result = await wf.run(query="这个索引的应用场景", memory=FakeMemory())
+    assert str(result.response) == "你说的「这个索引」指哪一个？B+树还是全文索引？"
+    assert result.source_nodes == []
+    assert result.metadata.get("category") == "missing_info"
+
+
+async def test_explain_missing_info_without_clarify_uses_fallback():
+    # MissingInfo 缺 clarify_question → 用 REFUSAL_FALLBACK 兜底反问
+    llm = FakeLLM(['{"action": "dispatch_qa", "clean_query": "这个索引"}'])
+    wf = _wf(llm)
+
+    async def fake_gate(clean_query):
+        return clean_query, "explain"
+
+    async def fake_explain(ctx, query, book_titles):
+        raise MissingInfo("")                      # 缺反问句
+
+    wf.qa.gate = fake_gate
+    wf.qa.explain = fake_explain
+
+    result = await wf.run(query="这个索引", memory=FakeMemory())
+    assert str(result.response) == REFUSAL_FALLBACK
+    assert result.metadata.get("category") == "missing_info"
+
+
+async def test_explain_empty_skeleton_still_falls_to_agent():
+    # 回归：EmptySkeleton 不被 OutOfScope/MissingInfo catch 截胡，仍落 agent 兜底
+    llm = FakeLLM(['{"action": "dispatch_qa", "clean_query": "讲讲X"}'])
+    wf = _wf(llm)
+
+    async def fake_gate(clean_query):
+        return clean_query, "explain"
+
+    async def fake_explain(ctx, query, book_titles):
+        raise EmptySkeleton(query)
+
+    agent_called = {"v": False}
+
+    async def fake_agent(ctx, query, book_titles):
+        agent_called["v"] = True
+        return "agent 兜底答案", ["n1"]
+
+    wf.qa.gate = fake_gate
+    wf.qa.explain = fake_explain
+    wf.qa_agent.run = fake_agent
+
+    result = await wf.run(query="讲讲X", memory=FakeMemory())
+    assert agent_called["v"] is True
+    assert str(result.response) == "agent 兜底答案"
+    assert result.source_nodes == ["n1"]
+
+
+async def test_out_of_scope_branch_uses_refusal_text_constant():
+    # 回归：other 路库外分支话术 = REFUSAL_TEXT（单一来源，不另写一句）
+    llm = FakeLLM(['{"action": "dispatch_qa", "clean_query": "MongoDB分片"}'])
+    wf = _wf(llm)
+
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
+        raise AssertionError("库外不应检索")
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("out_of_scope", reason="库外")
+    wf.qa.classify = fake_classify
+
+    wf.qa.retrieve = fake_retrieve
+
+    result = await wf.run(query="MongoDB分片", memory=FakeMemory())
+    assert str(result.response) == REFUSAL_TEXT
+    assert result.metadata.get("category") == "out_of_scope"
+
