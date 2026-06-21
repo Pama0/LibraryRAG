@@ -255,15 +255,15 @@ class QaCapability:
             except Exception as exc:
                 logger.warning("complex agent 失败，降级单轮：%s", exc)
                 return await self.retrieve(ctx, q, book_titles)
-        # simple（含分类降级）：先单轮检索+合成，证据不足且有 agent → 升级覆盖
-        answer, nodes = await self.retrieve(ctx, q, book_titles)
+        # simple（含分类降级）：先检索一次，证据不足且有 agent → 升级；否则复用节点合成
+        nodes = await self._retrieve_nodes(q, book_titles)
         if self._evidence_weak(nodes) and self.qa_agent is not None:
             logger.info("simple 证据不足，升级 agent：%r", q[:60])
             try:
                 return await self.qa_agent.run(ctx, q, book_titles)
             except Exception as exc:
                 logger.warning("simple 升级 agent 失败，回落单轮：%s", exc)
-        return answer, nodes
+        return await self.retrieve(ctx, q, book_titles, nodes=nodes)
 
     def _format_probe(self, nodes: list, book_titles) -> str:
         """探测召回 → 喂 judge 的信号：命中数 + 章节分布 + top 截断片段。"""
@@ -297,14 +297,18 @@ class QaCapability:
         query: str,
         book_titles: Optional[list[str]],
         preamble: str = "",
+        nodes: Optional[list] = None,
     ) -> tuple[str, list]:
         """直接检索 + 流式合成（绕开 agent/工具）。返回 (答案文本, source_nodes)。
 
         preamble 非空 → 进入答案阶段后先推一个 AnswerDeltaEvent，并拼在答案最前
         （供 missing_info 预算耗尽降级时声明"按最可能解读作答"）。空命中不带声明。
+        nodes 非空 → 复用已检索节点，跳过内部检索（供 simple 安全网"检索一次→判定→合成"
+        复用，避免二次检索）。
         """
         ctx.write_event_to_stream(RetrievalStartEvent(query=query))
-        nodes = await self._retrieve_nodes(query, book_titles)
+        if nodes is None:
+            nodes = await self._retrieve_nodes(query, book_titles)
         logger.info("retrieve: 命中 %d 段 scope=%s", len(nodes), book_titles)
         ctx.write_event_to_stream(RetrievalDoneEvent(count=len(nodes)))
         if not nodes:

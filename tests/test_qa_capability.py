@@ -1142,8 +1142,10 @@ class _FakeAgent:
 
 async def test_execute_simple_with_enough_evidence_uses_retrieve():
     qa = _qa()
-    async def fake_retrieve(ctx, q, bt, preamble=""):
-        return "单轮答案", ["n1", "n2"]
+    async def fake_nodes(q, bt): return ["n1", "n2"]
+    qa._retrieve_nodes = fake_nodes
+    async def fake_retrieve(ctx, q, bt, preamble="", nodes=None):
+        return "单轮答案", (nodes if nodes is not None else ["x"])
     qa.retrieve = fake_retrieve
     qa.qa_agent = _FakeAgent()
     ans, nodes = await qa._execute_subq(FakeCtx(), "MySQL有哪些锁", "simple", None)
