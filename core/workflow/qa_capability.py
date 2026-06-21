@@ -28,11 +28,12 @@ from llama_index.core.workflow import Context, Event
 
 from core.retrieval.rerank import Reranker
 from core.retrieval.retrieve import Retriever, VectorRetriever
+from core.workflow.admitter import Admitter
 from core.workflow.chapter_tree import children, dominant_prefix, unique_chapters
 from core.workflow.query_decompose import QueryDecomposer
 from core.workflow.query_dimension import DimensionExtractor
 from core.workflow.query_gate import QueryGate
-from core.workflow.query_preprocess import QueryPreprocessor
+from core.workflow.query_preprocess import QueryPreprocessor, PreprocessResult
 from core.workflow.answer_outliner import AnswerOutliner
 
 logger = logging.getLogger(__name__)
@@ -143,6 +144,7 @@ class QaCapability:
         self.explain_retriever = explain_retriever or VectorRetriever()
         self.explain_recall_k = explain_recall_k
         self._gate = QueryGate(llm)
+        self.admitter = Admitter(llm)
         self.outliner = AnswerOutliner(llm)
         self._retrieve_concurrency = 4  # 扇出检索并发上限，防 embedding/BM25/rerank 打爆
 
@@ -157,9 +159,11 @@ class QaCapability:
         book_titles: Optional[list[str]] = None,
         probe: bool = True,
     ):
-        """先用 clean_query 探测召回，把召回信号喂给 judge，堵住「盲判」。
+        """先用 clean_query 探测召回，把召回信号喂给 admit + judge，堵住「盲判」。
 
         probe=False（ablation baseline）→ 不探测、纯文本判定；probe 失败亦容错为空。
+        可答性闸：admit 吃 probe 证据判 ok/missing_info/out_of_scope；非 ok 短路返回该类，
+        ok 才跑瘦身分类器（4 类）。对外契约仍可出 6 类，workflow step 图不变。
         """
         retrieval_context = ""
         if probe:
@@ -168,6 +172,18 @@ class QaCapability:
                 retrieval_context = self._format_probe(located, book_titles)
             except Exception as exc:
                 logger.warning("classify probe 探测失败，退回纯文本判定：%s", exc)
+        try:
+            verdict = await self.admitter.run(clean_query, [retrieval_context])
+            if verdict.verdict == "out_of_scope":
+                return PreprocessResult("out_of_scope", verdict.reason)
+            if verdict.verdict == "missing_info":
+                return PreprocessResult(
+                    "missing_info", verdict.reason, verdict.clarify_question
+                )
+        except Exception as exc:
+            # admit 抛错 → 降级 ok 放行 preprocessor；Admitter 内部已兜底 LLM 失败，
+            # 此处再兜一层防 admitter.run 契约级异常，绝不阻塞。
+            logger.warning("classify admit 抛错，降级 ok 放行：%s", exc)
         return await self.preprocessor.run(clean_query, retrieval_context)
 
     def _format_probe(self, nodes: list, book_titles) -> str:

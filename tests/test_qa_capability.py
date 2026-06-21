@@ -326,7 +326,12 @@ async def test_classify_probes_then_passes_context_to_preprocessor():
         from core.workflow.query_preprocess import PreprocessResult
         return PreprocessResult("retrievable")
 
+    async def fake_admit(query, passages):
+        from core.workflow.admitter import AdmitVerdict
+        return AdmitVerdict(verdict="ok")
+
     qa.preprocessor.run = fake_run
+    qa.admitter.run = fake_admit
     await qa.classify("给我讲明白openclaw", ["openclaw"])
     assert "openclaw 是一个工具" in captured["ctx"]   # 探测片段进了召回上下文
     assert "《openclaw》" in captured["ctx"]           # 章节分布进了上下文
@@ -341,7 +346,12 @@ async def test_classify_degrades_when_probe_fails():
         from core.workflow.query_preprocess import PreprocessResult
         return PreprocessResult("retrievable")
 
+    async def fake_admit(query, passages):
+        from core.workflow.admitter import AdmitVerdict
+        return AdmitVerdict(verdict="ok")
+
     qa.preprocessor.run = fake_run
+    qa.admitter.run = fake_admit
     result = await qa.classify("openclaw", ["openclaw"])
     assert captured["ctx"] == ""           # probe 失败 → 空上下文，不阻塞
     assert result.category == "retrievable"
@@ -470,7 +480,12 @@ async def _run_classify(qa, query="openclaw", books=None):
         from core.workflow.query_preprocess import PreprocessResult
         return PreprocessResult("retrievable")
 
+    async def fake_admit(query, passages):
+        from core.workflow.admitter import AdmitVerdict
+        return AdmitVerdict(verdict="ok")
+
     qa.preprocessor.run = fake_run
+    qa.admitter.run = fake_admit
     return await qa.classify(query, books or ["openclaw"])
 
 
@@ -894,3 +909,97 @@ def test_missing_info_exception_carries_clarify_question():
 def test_missing_info_exception_default_clarify_empty():
     exc = MissingInfo()
     assert exc.clarify_question == ""
+
+
+# ── classify：admit 短路 / ok 落 preprocessor（Task 3）──────────────────
+from core.workflow.query_preprocess import PreprocessResult
+from core.workflow.admitter import Admitter, AdmitVerdict
+
+
+def _ok_admitter(qa):
+    """给 qa 装一个恒 ok 的 admitter，复用现有 classify 测试。"""
+    async def _ok(query, passages):
+        return AdmitVerdict(verdict="ok")
+    qa.admitter.run = _ok
+
+
+async def test_classify_admit_out_of_scope_short_circuits_before_preprocessor():
+    qa = _qa(FakeIndexManager(nodes=[_PNode("openclaw 是一个工具")]))
+    preprocessor_called = {"v": False}
+
+    async def fake_preprocessor(clean_query, retrieval_context=""):
+        preprocessor_called["v"] = True
+        return PreprocessResult("retrievable")
+
+    async def fake_admit(query, passages):
+        return AdmitVerdict(verdict="out_of_scope", reason="库外，召回全是别的系统")
+
+    qa.preprocessor.run = fake_preprocessor
+    qa.admitter.run = fake_admit
+
+    result = await qa.classify("PostgreSQL的MVCC", ["openclaw"])
+    assert result.category == "out_of_scope"
+    assert result.reason == "库外，召回全是别的系统"
+    assert preprocessor_called["v"] is False    # 短路，不跑瘦身分类器
+
+
+async def test_classify_admit_missing_info_short_circuits_with_clarify():
+    qa = _qa(FakeIndexManager(nodes=[_PNode("索引内容")]))
+    preprocessor_called = {"v": False}
+
+    async def fake_preprocessor(clean_query, retrieval_context=""):
+        preprocessor_called["v"] = True
+        return PreprocessResult("retrievable")
+
+    async def fake_admit(query, passages):
+        return AdmitVerdict(
+            verdict="missing_info", reason="指代不明",
+            clarify_question="你说的「这个索引」指哪一个？B+树还是全文索引？",
+        )
+
+    qa.preprocessor.run = fake_preprocessor
+    qa.admitter.run = fake_admit
+
+    result = await qa.classify("这个索引的应用场景", ["openclaw"])
+    assert result.category == "missing_info"
+    assert result.clarify_question == "你说的「这个索引」指哪一个？B+树还是全文索引？"
+    assert preprocessor_called["v"] is False
+
+
+async def test_classify_admit_ok_falls_through_to_preprocessor():
+    qa = _qa(FakeIndexManager(nodes=[_PNode("openclaw 是一个工具")]))
+    captured = {"ctx": None}
+
+    async def fake_preprocessor(clean_query, retrieval_context=""):
+        captured["ctx"] = retrieval_context
+        return PreprocessResult("pending_split", reason="需扇出")
+
+    async def fake_admit(query, passages):
+        return AdmitVerdict(verdict="ok")
+
+    qa.preprocessor.run = fake_preprocessor
+    qa.admitter.run = fake_admit
+
+    result = await qa.classify("讲讲openclaw", ["openclaw"])
+    assert result.category == "pending_split"          # ok → 跑瘦身分类器
+    assert "openclaw 是一个工具" in captured["ctx"]    # probe 证据透传给 preprocessor（行为同前）
+
+
+async def test_classify_admit_failure_degrades_to_ok_and_runs_preprocessor():
+    # admit 抛错 → 降级 ok → 仍跑 preprocessor（绝不阻塞）
+    qa = _qa(FakeIndexManager(nodes=[_PNode("片段")]))
+    preprocessor_called = {"v": False}
+
+    async def fake_preprocessor(clean_query, retrieval_context=""):
+        preprocessor_called["v"] = True
+        return PreprocessResult("retrievable")
+
+    async def boom_admit(query, passages):
+        raise RuntimeError("admit 炸了")
+
+    qa.preprocessor.run = fake_preprocessor
+    qa.admitter.run = boom_admit
+
+    result = await qa.classify("MySQL锁", ["MySQL"])
+    assert result.category == "retrievable"
+    assert preprocessor_called["v"] is True
