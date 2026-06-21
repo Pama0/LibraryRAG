@@ -916,13 +916,6 @@ from core.workflow.query_preprocess import PreprocessResult
 from core.workflow.admitter import Admitter, AdmitVerdict
 
 
-def _ok_admitter(qa):
-    """给 qa 装一个恒 ok 的 admitter，复用现有 classify 测试。"""
-    async def _ok(query, passages):
-        return AdmitVerdict(verdict="ok")
-    qa.admitter.run = _ok
-
-
 async def test_classify_admit_out_of_scope_short_circuits_before_preprocessor():
     qa = _qa(FakeIndexManager(nodes=[_PNode("openclaw 是一个工具")]))
     preprocessor_called = {"v": False}

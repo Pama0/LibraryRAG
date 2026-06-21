@@ -107,7 +107,8 @@ class QueryJudgment(BaseModel):
     rewritten_query: str = Field(..., min_length=1, description="降噪后的检索 query")
     reason: str = Field(default="", description="对应分类的原因说明")
     clarify_question: str = Field(
-        default="", description="missing_info 专用：面向用户的自然反问句"
+        default="",
+        description="保留供 PreprocessResult schema 兼容（可答性轴 missing_info 已上移到 Admitter；本 4 类分类器不产该值，恒空）",
     )
 
 
