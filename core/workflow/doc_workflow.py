@@ -41,7 +41,11 @@ from core.workflow.front_door import FrontDoorAgent
 from core.workflow.qa_capability import (  # noqa: F401  (事件类 re-export 供 api 层 import)
     AnswerDeltaEvent,
     EmptySkeleton,
+    MissingInfo,
+    OutOfScope,
     QaCapability,
+    REFUSAL_FALLBACK,
+    REFUSAL_TEXT,
     RetrievalDoneEvent,
     RetrievalStartEvent,
 )
@@ -268,22 +272,29 @@ class DocQueryWorkflow(Workflow):
 
     @step
     async def out_of_scope_branch(self, ctx: Context, ev: OutOfScopeEvent) -> FinalizeEvent:
-        # 库外：探测召回片段与问题主题无关 → 对话式转场，友好告知 + 邀请换问法，不检索/不反问。
-        return FinalizeEvent(
-            answer=(
-                "这个问题知识库里暂未收录相关内容，我没法基于现有资料回答。"
-                "你可以换个已入库主题问我，或把问题换个角度再试试～"
-            ),
-            source_nodes=[],
-        )
+        # 库外：探测召回片段与问题主题无关 → 共享拒答话术（与 explain OutOfScope catch 同源）。
+        return FinalizeEvent(answer=REFUSAL_TEXT, source_nodes=[])
 
     @step
     async def explain_branch(self, ctx: Context, ev: ExplainEvent) -> FinalizeEvent:
-        # explain：讲清楚精修工作流。空骨架 → 落有界 agent 多轮探索 → agent 再失败 → 单轮兜底。
+        # explain：讲清楚精修工作流。
+        # - admit 判库外 → OutOfScope → 拒答 finalize + 写 category（供评测算分类准确率）
+        # - admit 判信息不足 → MissingInfo → 反问 finalize + 写 category
+        # - 空骨架 → 落有界 agent 多轮探索 → agent 再失败 → 单轮兜底
         rewritten = await ctx.store.get("rewritten_query")
         book_titles = await ctx.store.get("book_titles")
         try:
             answer, nodes = await self.qa.explain(ctx, rewritten, book_titles)
+        except OutOfScope:
+            logger.info("explain: admit 判库外，拒答")
+            await ctx.store.set("category", "out_of_scope")
+            return FinalizeEvent(answer=REFUSAL_TEXT, source_nodes=[])
+        except MissingInfo as e:
+            logger.info("explain: admit 判信息不足，反问")
+            await ctx.store.set("category", "missing_info")
+            return FinalizeEvent(
+                answer=e.clarify_question or REFUSAL_FALLBACK, source_nodes=[]
+            )
         except EmptySkeleton:
             logger.info("explain: 空骨架，落 agent 兜底")
             try:

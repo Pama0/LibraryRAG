@@ -71,7 +71,6 @@ async def test_study_plan_intent_short_circuits_without_qa_preprocess():
 async def test_qa_intent_feeds_clean_query_and_scope_to_answer():
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "MySQL索引有哪些"}',
-        '{"category": "retrievable", "rewritten_query": "MySQL索引有哪些"}',
     ])
     wf = _wf(llm)
 
@@ -81,6 +80,11 @@ async def test_qa_intent_feeds_clean_query_and_scope_to_answer():
         captured["query"] = query
         captured["book_titles"] = book_titles
         return "答案", ["n1"]
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("retrievable")
+    wf.qa.classify = fake_classify
 
     wf.qa.retrieve = fake_retrieve
 
@@ -97,12 +101,16 @@ async def test_route_passes_selected_books_to_router():
     # 用户选中的书 scope 要喂给门口 Router，用于把"这本书"补全
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "《openclaw》讲了什么"}',
-        '{"category": "retrievable", "rewritten_query": "《openclaw》讲了什么"}',
     ])
     wf = _wf(llm)
 
     async def fake_retrieve(ctx, query, book_titles, preamble=""):
         return "答案", []
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("retrievable")
+    wf.qa.classify = fake_classify
 
     wf.qa.retrieve = fake_retrieve
 
@@ -113,24 +121,30 @@ async def test_route_passes_selected_books_to_router():
 async def test_qa_preprocess_consumes_clean_query_not_original():
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "MySQL索引有哪些"}',
-        '{"category": "retrievable", "rewritten_query": "MySQL索引有哪些"}',
     ])
     wf = _wf(llm)
+
+    captured = {}
 
     async def fake_retrieve(ctx, query, book_titles, preamble=""):
         return "答案", []
 
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        captured["clean"] = clean_query
+        return PreprocessResult("retrievable")
+    wf.qa.classify = fake_classify
+
     wf.qa.retrieve = fake_retrieve
 
     await wf.run(query="它有哪些", memory=FakeMemory())
-    assert "MySQL索引有哪些" in llm.prompts[1]
-    assert "它有哪些" not in llm.prompts[1]
+    assert captured["clean"] == "MySQL索引有哪些"
+    assert "它有哪些" not in captured["clean"]
 
 
 async def test_router_parse_failure_defaults_to_qa_path():
     llm = FakeLLM([
         "这不是JSON",
-        '{"category": "retrievable", "rewritten_query": "B+树索引"}',
     ])
     wf = _wf(llm)
 
@@ -140,17 +154,21 @@ async def test_router_parse_failure_defaults_to_qa_path():
         captured["query"] = query
         return "答案", []
 
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("retrievable")
+    wf.qa.classify = fake_classify
+
     wf.qa.retrieve = fake_retrieve
 
     await wf.run(query="B+树索引", memory=FakeMemory())
-    assert llm.calls == 2
+    assert llm.calls == 1
     assert captured["query"] == "B+树索引"
 
 
 async def test_missing_info_clarifies_without_retrieval():
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "这个索引的应用场景"}',
-        '{"category": "missing_info", "rewritten_query": "这个索引的应用场景", "reason": "指代不明"}',
     ])
     wf = _wf(llm)
 
@@ -159,6 +177,11 @@ async def test_missing_info_clarifies_without_retrieval():
     async def fake_retrieve(ctx, query, book_titles, preamble=""):
         called["retrieve"] = True
         return "不应被调用", []
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("missing_info", reason="指代不明")
+    wf.qa.classify = fake_classify
 
     wf.qa.retrieve = fake_retrieve
 
@@ -171,9 +194,17 @@ async def test_missing_info_clarifies_without_retrieval():
 async def test_missing_info_uses_natural_clarify_question():
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "这个索引的应用场景"}',
-        '{"category": "missing_info", "rewritten_query": "这个索引的应用场景", "reason": "指代不明", "clarify_question": "你说的「这个索引」指哪一个？B+树还是全文索引？"}',
     ])
     wf = _wf(llm)
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult(
+            "missing_info",
+            clarify_question="你说的「这个索引」指哪一个？B+树还是全文索引？",
+        )
+    wf.qa.classify = fake_classify
+
     result = await wf.run(query="这个索引的应用场景", memory=FakeMemory())
     assert "你说的「这个索引」指哪一个" in str(result.response)
 
@@ -182,7 +213,6 @@ async def test_other_category_answers_via_dedicated_branch():
     # other 不再与 retrievable/解析失败混走 fallback，而是独立分支（v1 暂仍单轮检索）
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "设计一个支持千万级并发的发号器"}',
-        '{"category": "other", "rewritten_query": "设计一个支持千万级并发的发号器", "reason": "开放设计题"}',
     ])
     wf = _wf(llm)
 
@@ -191,6 +221,11 @@ async def test_other_category_answers_via_dedicated_branch():
     async def fake_retrieve(ctx, query, book_titles, preamble=""):
         captured["query"] = query
         return "复杂问题答案", ["n1"]
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("other", reason="开放设计题")
+    wf.qa.classify = fake_classify
 
     wf.qa.retrieve = fake_retrieve
 
@@ -203,7 +238,6 @@ async def test_other_category_answers_via_dedicated_branch():
 async def test_missing_info_budget_exhausted_assumes_and_answers():
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "这个索引的应用场景"}',
-        '{"category": "missing_info", "rewritten_query": "这个索引的应用场景", "reason": "指代不明"}',
     ])
     wf = _wf(llm)
 
@@ -213,6 +247,11 @@ async def test_missing_info_budget_exhausted_assumes_and_answers():
         captured["query"] = query
         captured["preamble"] = preamble
         return preamble + "尽力答", ["n1"]
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("missing_info", reason="指代不明")
+    wf.qa.classify = fake_classify
 
     wf.qa.retrieve = fake_retrieve
 
@@ -227,7 +266,6 @@ async def test_missing_info_budget_exhausted_assumes_and_answers():
 async def test_other_dispatches_to_bounded_agent():
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "对比 openclaw 的两种架构取舍"}',
-        '{"category": "other", "rewritten_query": "对比 openclaw 的两种架构取舍", "reason": "开放权衡"}',
     ])
     wf = _wf(llm)
 
@@ -237,6 +275,11 @@ async def test_other_dispatches_to_bounded_agent():
         captured["query"] = query
         captured["book_titles"] = book_titles
         return "agent 综合答案", ["n1", "n2"]
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("other", reason="开放权衡")
+    wf.qa.classify = fake_classify
 
     wf.qa_agent.run = fake_agent_run
 
@@ -250,12 +293,16 @@ async def test_other_dispatches_to_bounded_agent():
 async def test_other_falls_back_to_single_retrieve_when_agent_raises(caplog):
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "设计题"}',
-        '{"category": "other", "rewritten_query": "设计题", "reason": "开放设计"}',
     ])
     wf = _wf(llm)
 
     async def boom(ctx, query, book_titles):
         raise RuntimeError("agent 失败")
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("other", reason="开放设计")
+    wf.qa.classify = fake_classify
 
     wf.qa_agent.run = boom
 
@@ -300,7 +347,6 @@ async def test_flags_off_degrade_branches_to_single_retrieve():
     # split flag 关 → pending_split 走单轮 retrieve（baseline 对比用）
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "讲讲MySQL"}',
-        '{"category": "pending_split", "rewritten_query": "讲讲MySQL", "reason": "需罗列"}',
     ])
     wf = DocQueryWorkflow(
         index_manager=None, llm=llm, similarity_top_k=3, timeout=10,
@@ -316,6 +362,11 @@ async def test_flags_off_degrade_branches_to_single_retrieve():
     async def boom_split(ctx, query, book_titles):
         raise AssertionError("split 不应被调用（flag off）")
 
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("pending_split", reason="需罗列")
+    wf.qa.classify = fake_classify
+
     wf.qa.retrieve = fake_retrieve
     wf.qa.split = boom_split
     result = await wf.run(query="讲讲MySQL", memory=FakeMemory())
@@ -326,12 +377,16 @@ async def test_flags_off_degrade_branches_to_single_retrieve():
 async def test_finalize_exposes_category_in_metadata():
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "MySQL锁"}',
-        '{"category": "retrievable", "rewritten_query": "MySQL锁"}',
     ])
     wf = _wf(llm)
 
     async def fake_retrieve(ctx, query, book_titles, preamble=""):
         return "答案", ["n1"]
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("retrievable")
+    wf.qa.classify = fake_classify
 
     wf.qa.retrieve = fake_retrieve
     result = await wf.run(query="MySQL锁", memory=FakeMemory())
@@ -368,7 +423,6 @@ async def test_out_of_scope_responds_without_retrieval_or_clarify():
     # 库外问题（PostgreSQL）→ out_of_scope → 固定话术，不检索/不反问
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "PostgreSQL的MVCC是怎么实现的"}',
-        '{"category": "out_of_scope", "rewritten_query": "PostgreSQL的MVCC是怎么实现的", "reason": "库外，召回片段均不相关"}',
     ])
     wf = _wf(llm)
 
@@ -377,6 +431,11 @@ async def test_out_of_scope_responds_without_retrieval_or_clarify():
     async def fake_retrieve(ctx, query, book_titles, preamble=""):
         called["retrieve"] = True
         return "不应被调用", []
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("out_of_scope", reason="库外，召回片段均不相关")
+    wf.qa.classify = fake_classify
 
     wf.qa.retrieve = fake_retrieve
 
@@ -524,4 +583,133 @@ def test_probe_reranker_name_resolved_and_injected(monkeypatch):
                           probe_reranker="bge-reranker-v2-m3")
 
     assert wf.qa.probe_reranker is sentinels["bge-reranker-v2-m3"]
+
+
+# ── explain_branch：catch OutOfScope/MissingInfo + EmptySkeleton 仍落 agent（Task 6）──
+from core.workflow.qa_capability import (
+    EmptySkeleton, OutOfScope, MissingInfo, REFUSAL_TEXT, REFUSAL_FALLBACK,
+)
+
+
+async def test_explain_out_of_scope_refuses_with_category():
+    # explain admit 判库外 → 抛 OutOfScope → explain_branch 拒答 + category=out_of_scope
+    llm = FakeLLM(['{"action": "dispatch_qa", "clean_query": "PostgreSQL的MVCC"}'])
+    wf = _wf(llm)
+
+    async def fake_gate(clean_query):
+        return clean_query, "explain"
+
+    async def fake_explain(ctx, query, book_titles):
+        raise OutOfScope(query)
+
+    async def fake_agent(ctx, query, book_titles):
+        raise AssertionError("agent 不应被调用（库外应直接拒答）")
+
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
+        raise AssertionError("retrieve 不应被调用")
+
+    wf.qa.gate = fake_gate
+    wf.qa.explain = fake_explain
+    wf.qa_agent.run = fake_agent
+    wf.qa.retrieve = fake_retrieve
+
+    result = await wf.run(query="PostgreSQL的MVCC", memory=FakeMemory())
+    assert str(result.response) == REFUSAL_TEXT
+    assert result.source_nodes == []
+    assert result.metadata.get("category") == "out_of_scope"
+    assert result.metadata.get("intent") == "explain"
+
+
+async def test_explain_missing_info_clarifies_with_category():
+    # explain admit 判信息不足 → 抛 MissingInfo(反问) → explain_branch 反问 + category=missing_info
+    llm = FakeLLM(['{"action": "dispatch_qa", "clean_query": "这个索引的应用场景"}'])
+    wf = _wf(llm)
+
+    async def fake_gate(clean_query):
+        return clean_query, "explain"
+
+    async def fake_explain(ctx, query, book_titles):
+        raise MissingInfo("你说的「这个索引」指哪一个？B+树还是全文索引？")
+
+    async def fake_agent(ctx, query, book_titles):
+        raise AssertionError("agent 不应被调用（信息不足应直接反问）")
+
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
+        raise AssertionError("retrieve 不应被调用")
+
+    wf.qa.gate = fake_gate
+    wf.qa.explain = fake_explain
+    wf.qa_agent.run = fake_agent
+    wf.qa.retrieve = fake_retrieve
+
+    result = await wf.run(query="这个索引的应用场景", memory=FakeMemory())
+    assert str(result.response) == "你说的「这个索引」指哪一个？B+树还是全文索引？"
+    assert result.source_nodes == []
+    assert result.metadata.get("category") == "missing_info"
+
+
+async def test_explain_missing_info_without_clarify_uses_fallback():
+    # MissingInfo 缺 clarify_question → 用 REFUSAL_FALLBACK 兜底反问
+    llm = FakeLLM(['{"action": "dispatch_qa", "clean_query": "这个索引"}'])
+    wf = _wf(llm)
+
+    async def fake_gate(clean_query):
+        return clean_query, "explain"
+
+    async def fake_explain(ctx, query, book_titles):
+        raise MissingInfo("")                      # 缺反问句
+
+    wf.qa.gate = fake_gate
+    wf.qa.explain = fake_explain
+
+    result = await wf.run(query="这个索引", memory=FakeMemory())
+    assert str(result.response) == REFUSAL_FALLBACK
+    assert result.metadata.get("category") == "missing_info"
+
+
+async def test_explain_empty_skeleton_still_falls_to_agent():
+    # 回归：EmptySkeleton 不被 OutOfScope/MissingInfo catch 截胡，仍落 agent 兜底
+    llm = FakeLLM(['{"action": "dispatch_qa", "clean_query": "讲讲X"}'])
+    wf = _wf(llm)
+
+    async def fake_gate(clean_query):
+        return clean_query, "explain"
+
+    async def fake_explain(ctx, query, book_titles):
+        raise EmptySkeleton(query)
+
+    agent_called = {"v": False}
+
+    async def fake_agent(ctx, query, book_titles):
+        agent_called["v"] = True
+        return "agent 兜底答案", ["n1"]
+
+    wf.qa.gate = fake_gate
+    wf.qa.explain = fake_explain
+    wf.qa_agent.run = fake_agent
+
+    result = await wf.run(query="讲讲X", memory=FakeMemory())
+    assert agent_called["v"] is True
+    assert str(result.response) == "agent 兜底答案"
+    assert result.source_nodes == ["n1"]
+
+
+async def test_out_of_scope_branch_uses_refusal_text_constant():
+    # 回归：other 路库外分支话术 = REFUSAL_TEXT（单一来源，不另写一句）
+    llm = FakeLLM(['{"action": "dispatch_qa", "clean_query": "MongoDB分片"}'])
+    wf = _wf(llm)
+
+    async def fake_retrieve(ctx, query, book_titles, preamble=""):
+        raise AssertionError("库外不应检索")
+
+    async def fake_classify(clean_query, book_titles=None, probe=True):
+        from core.workflow.query_preprocess import PreprocessResult
+        return PreprocessResult("out_of_scope", reason="库外")
+    wf.qa.classify = fake_classify
+
+    wf.qa.retrieve = fake_retrieve
+
+    result = await wf.run(query="MongoDB分片", memory=FakeMemory())
+    assert str(result.response) == REFUSAL_TEXT
+    assert result.metadata.get("category") == "out_of_scope"
 
