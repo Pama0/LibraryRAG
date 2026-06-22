@@ -1,18 +1,20 @@
 """QA capability：文档库问答的检索 + 合成实质逻辑（从 DocQueryWorkflow 抽出）。
 
 `DocQueryWorkflow` 是顶层 Router 编排，把 `intent=qa` dispatch 到这里。本类是
-注入式协作单元（与 `IntentRouter` / `QuerySplitter` / `QueryClassifier` 同一
-模式），【不依赖 LlamaIndex Workflow step 机制】，便于独立单测。
+注入式协作单元（与 `IntentRouter` / `QueryClassifier` 同一模式），【不依赖
+LlamaIndex Workflow step 机制】，便于独立单测。
 
 持有：
 - 检索（`index_manager`）+ 合成（`llm`）。
-- 拆分 `QuerySplitter`（一句话 → ≥1 个降噪自包含子问题）。
-- 可答性闸 `Admitter`（probe 证据判 ok/missing_info/out_of_scope）+ 瘦身分类
-  `QueryClassifier`（ok 子问题判 explain/compare/simple/complex）。
+- 拆分已上移 front_door（`RoutedSubQuery` 路由计划，本类不再自拆）。
+- 可答性闸 `Admitter`（probe 证据判 ok/missing_info/out_of_scope，同时算 per-subq scope）
+  + 瘦身分类 `QueryClassifier`（ok 子问题判 explain/compare/simple/complex）。
 
-对外主入口：`answer(ctx, clean_query, book_titles, probe)` —— 拆分 → 并行逐子问题判定
-（`_decide_subq`：probe → admit → classify）→ 按序执行 ok 子问题（`_execute_subq` 按
-category 分派）→ 合并装饰非 ok 子问题。单问题退化为旧单路径（无分节标题）。
+对外主入口：`answer(ctx, sub_queries, book_titles, probe, disable_scope)` —— 消费
+front_door 产的路由计划（`list[RoutedSubQuery]`）：QA 子问题并行判定（`_decide_subq`：
+probe → admit → classify，同时算 scope）→ 按路由计划顺序执行 ok 子问题（`_execute_subq`
+按 category 分派，在该子问题 scope 内检索）/ 装饰 converse 子问题 → 合并装饰非 ok 子问题。
+单子问题退化为旧单路径（无分节标题）。
 分支执行体仍独立可调：`retrieve`/`explain`/`split`/`assume`（均接收 query/book_titles，
 返回 (answer, source_nodes)）。
 
@@ -35,7 +37,6 @@ from core.workflow.chapter_tree import children, dominant_prefix, unique_chapter
 from core.workflow.query_classifier import QueryClassifier
 from core.workflow.query_decompose import QueryDecomposer
 from core.workflow.query_dimension import DimensionExtractor
-from core.workflow.query_splitter import QuerySplitter
 from core.workflow.answer_outliner import AnswerOutliner
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,7 @@ class _SubDecision:
     category: str = ""           # explain/compare/simple/complex（仅 ok）
     reason: str = ""
     clarify_question: str = ""
+    scope: Optional[list[str]] = None
 
 
 class QaCapability:
@@ -164,36 +166,40 @@ class QaCapability:
         self.admitter = Admitter(llm)
         self.outliner = AnswerOutliner(llm)
         self._retrieve_concurrency = 4  # 扇出检索并发上限，防 embedding/BM25/rerank 打爆
-        self.splitter = QuerySplitter(llm)
         self.classifier = QueryClassifier(llm)
         # 有界 agent 由 doc_workflow 构造后注入（complex / simple 升级用）；None → 降级单轮
         self.qa_agent = None
 
     async def _decide_subq(
-        self, q: str, book_titles: Optional[list[str]], probe: bool = True
+        self, q: str, book_titles: Optional[list[str]],
+        probe: bool = True, disable_scope: bool = False,
     ) -> "_SubDecision":
-        """单子问题判定：probe → admit（非 ok 短路）→ classify。失败一律放行/降级。"""
+        """单子问题判定：probe → admit（非 ok 短路，同时拿 scope）→ classify。失败一律放行/降级。"""
+        nodes: list = []
         evidence = ""
         if probe:
             try:
-                located = await self._probe_retrieve(q, book_titles)
-                evidence = self._format_probe(located, book_titles)
+                nodes = await self._probe_retrieve(q, book_titles)
+                evidence = self._format_probe(nodes, book_titles)
             except Exception as exc:
                 logger.warning("_decide_subq probe 失败，纯文本判定：%s", exc)
+        # 手选书 / disable_scope → 不自动算 scope（手选即 scope；disable → 全库）
+        auto = (not book_titles) and (not disable_scope)
         try:
-            verdict = await self.admitter.run(q, [evidence])
+            verdict = await self.admitter.run(q, [evidence], nodes=nodes if auto else None)
         except Exception as exc:
             logger.warning("_decide_subq admit 抛错，降级 ok：%s", exc)
             verdict = None
+        scope = (verdict.scope if (auto and verdict is not None) else book_titles)
         if verdict is not None and verdict.verdict == "out_of_scope":
-            return _SubDecision(q, "out_of_scope", reason=verdict.reason)
+            return _SubDecision(q, "out_of_scope", reason=verdict.reason, scope=scope)
         if verdict is not None and verdict.verdict == "missing_info":
             return _SubDecision(
                 q, "missing_info", reason=verdict.reason,
-                clarify_question=verdict.clarify_question,
+                clarify_question=verdict.clarify_question, scope=scope,
             )
         result = await self.classifier.run(q, evidence)
-        return _SubDecision(q, "ok", category=result.category, reason=result.reason)
+        return _SubDecision(q, "ok", category=result.category, reason=result.reason, scope=scope)
 
     def _evidence_weak(self, nodes: list) -> bool:
         """simple 安全网触发判据：召回空 / top-1 分数低于阈值（complex 误判成 simple 时升级）。"""
@@ -203,12 +209,15 @@ class QaCapability:
         return top < self.simple_escalate_min_score
 
     async def _execute_subq(
-        self, ctx: Context, q: str, category: str, book_titles: Optional[list[str]]
+        self, ctx: Context, q: str, category: str, scope: Optional[list[str]]
     ) -> tuple[str, list]:
-        """按 category 分派执行；simple 证据不足升级 agent，complex agent 异常降级单轮。"""
+        """按 category 分派执行；在该子问题 scope 内检索。
+
+        simple 证据不足升级 agent，complex agent 异常降级单轮。
+        """
         if category == "explain":
             try:
-                return await self.explain(ctx, q, book_titles)
+                return await self.explain(ctx, q, scope)
             except OutOfScope:
                 logger.info("explain 子问题库外，降级拒答：%r", q[:60])
                 return REFUSAL_TEXT, []
@@ -218,88 +227,101 @@ class QaCapability:
             except EmptySkeleton:
                 if self.qa_agent is not None and self.agent_enabled:
                     try:
-                        return await self.qa_agent.run(ctx, q, book_titles)
+                        return await self.qa_agent.run(ctx, q, scope)
                     except Exception as exc:
                         logger.warning("explain 子问题 agent 兜底失败，降级单轮：%s", exc)
-                return await self.retrieve(ctx, q, book_titles)
+                return await self.retrieve(ctx, q, scope)
         if category == "compare":
-            return await self.assume(ctx, q, book_titles)
+            return await self.assume(ctx, q, scope)
         if category == "complex":
             if self.qa_agent is None or not self.agent_enabled:
-                return await self.retrieve(ctx, q, book_titles)
+                return await self.retrieve(ctx, q, scope)
             try:
-                return await self.qa_agent.run(ctx, q, book_titles)
+                return await self.qa_agent.run(ctx, q, scope)
             except Exception as exc:
                 logger.warning("complex agent 失败，降级单轮：%s", exc)
-                return await self.retrieve(ctx, q, book_titles)
+                return await self.retrieve(ctx, q, scope)
         # simple（含分类降级）：先检索一次，证据不足且有 agent → 升级；否则复用节点合成
-        nodes = await self._retrieve_nodes(q, book_titles)
+        nodes = await self._retrieve_nodes(q, scope)
         if self._evidence_weak(nodes) and self.qa_agent is not None and self.agent_enabled:
             logger.info("simple 证据不足，升级 agent：%r", q[:60])
             try:
-                return await self.qa_agent.run(ctx, q, book_titles)
+                return await self.qa_agent.run(ctx, q, scope)
             except Exception as exc:
                 logger.warning("simple 升级 agent 失败，回落单轮：%s", exc)
-        return await self.retrieve(ctx, q, book_titles, nodes=nodes)
-
-    async def split_query(self, clean_query: str) -> list[str]:
-        """委托 QuerySplitter：clean_query → ≥1 个降噪自包含子问题。"""
-        return await self.splitter.run(clean_query)
+        return await self.retrieve(ctx, q, scope, nodes=nodes)
 
     async def answer(
         self,
         ctx: Context,
-        clean_query: str,
+        sub_queries: list,                 # list[RoutedSubQuery]
         book_titles: Optional[list[str]],
         probe: bool = True,
+        disable_scope: bool = False,
     ) -> tuple[str, list, dict]:
-        """顶层编排：拆分 → 并行逐子问题判定 → 按序执行 ok 子问题 → 合并装饰。
+        """消费 front_door 路由计划：QA 子问题逐个判定+执行，converse 子问题装饰，合并。
 
-        - 并行只用于判定阶段（无用户可见输出）；执行/合成按子问题顺序串行（保流式顺序）。
-        - 单问题：无分节标题、无合并装饰，等价旧单路径。
-        - 部分非 ok：先答 ok 的，末尾追加 missing_info 反问 / out_of_scope "不在库" 提示。
-        - 全非 ok：纯拒答（out_of_scope→REFUSAL_TEXT）/反问（missing_info）。
+        - 并行只用于判定阶段（无用户可见输出）；执行/合成按路由计划顺序串行（保流式顺序）。
+        - 单子问题：无分节标题、无合并装饰，等价旧单路径。
+        - 部分非 ok：先答 ok 的 / converse 的，末尾追加 missing_info 反问 / out_of_scope 提示。
+        - 全无可见输出：纯拒答（out_of_scope→REFUSAL_TEXT）/反问（missing_info）。
         """
-        sub_qs = await self.split_query(clean_query)
-        decisions = await asyncio.gather(
-            *(self._decide_subq(q, book_titles, probe=probe) for q in sub_qs)
+        qa_subs = [s for s in sub_queries if s.action == "dispatch_qa"]
+        # 阶段一：并行判定 QA 子问题（无用户可见输出）
+        decided = await asyncio.gather(
+            *(self._decide_subq(s.query, book_titles, probe=probe, disable_scope=disable_scope)
+              for s in qa_subs)
         )
-        oks = [d for d in decisions if d.verdict == "ok"]
-        missing = [d for d in decisions if d.verdict == "missing_info"]
-        oos = [d for d in decisions if d.verdict == "out_of_scope"]
-        multi = len(sub_qs) > 1
+        by_query = {d.query: d for d in decided}
+        oks = [d for d in decided if d.verdict == "ok"]
+        missing = [d for d in decided if d.verdict == "missing_info"]
+        oos = [d for d in decided if d.verdict == "out_of_scope"]
+        multi = len(sub_queries) > 1
         meta = {
             "categories": [d.category for d in oks],
-            "sub_count": len(sub_qs),
+            "sub_count": len(sub_queries),
             "category": (oks[0].category if oks else "out_of_scope")
-            if len(sub_qs) == 1 else "multi",
+            if len(sub_queries) == 1 else "multi",
         }
 
-        # 全非 ok：退化纯拒答/反问（单条复用原话术）
-        if not oks:
-            if missing:
-                q = missing[0].clarify_question or REFUSAL_FALLBACK
-                return q, [], meta
-            return REFUSAL_TEXT, [], meta
-
-        # 执行 ok 子问题（按序流式）。多问题加分节标题；单问题裸答。
         parts: list[str] = []
         all_nodes: list = []
-        for d in oks:
+        produced_visible = False
+        # 按路由计划顺序输出：converse 装饰 + ok 子问题执行
+        for s in sub_queries:
+            if s.action == "converse":
+                text = s.reply or REFUSAL_FALLBACK
+                if multi:
+                    heading = f"\n## {s.query}\n"
+                    ctx.write_event_to_stream(AnswerDeltaEvent(delta=heading))
+                    parts.append(heading)
+                ctx.write_event_to_stream(AnswerDeltaEvent(delta=text))
+                parts.append(text)
+                produced_visible = True
+                continue
+            d = by_query.get(s.query)
+            if d is None or d.verdict != "ok":
+                continue
             if multi:
                 heading = f"\n## {d.query}\n"
                 ctx.write_event_to_stream(AnswerDeltaEvent(delta=heading))
                 parts.append(heading)
-            ans, nodes = await self._execute_subq(ctx, d.query, d.category, book_titles)
+            ans, nodes = await self._execute_subq(ctx, d.query, d.category, d.scope)
             parts.append(ans)
             all_nodes.extend(nodes)
+            produced_visible = True
 
-        # 末尾装饰：out_of_scope / missing_info 子问题（仅多问题且存在时）
+        # 全无可见输出（无 ok、无 converse）：纯拒答/反问
+        if not produced_visible:
+            if missing:
+                return (missing[0].clarify_question or REFUSAL_FALLBACK), [], meta
+            return REFUSAL_TEXT, [], meta
+
+        # 末尾装饰：out_of_scope / missing_info（仅多问题）
         tail = self._compose_tail(oos, missing) if multi else ""
         if tail:
             ctx.write_event_to_stream(AnswerDeltaEvent(delta=tail))
             parts.append(tail)
-
         return "".join(parts).strip(), all_nodes, meta
 
     @staticmethod

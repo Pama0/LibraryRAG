@@ -3,11 +3,12 @@
 与 book_rag.BookRagWorkflow 的本质区别：
 - 本 workflow 升为【顶层编排器】，持有并贯穿同一套会话 memory。
 - 门口准入节点（front_door.FrontDoorAgent）：读会话记忆消指代 + 规范化 → clean_query，
-  再四出口决策（dispatch_qa / dispatch_study_plan / converse / clarify），确定性 dispatch。
-  横切的"干净自包含 query"在此产出。
-- QA capability（qa_capability.QaCapability，注入）：拿 clean_query 做【降噪 + 难度
-  分类】（检索专属，不再消指代），按 category 路由到各分支【检索 + 流式合成】。
-  本 workflow 不再自持检索/合成实质逻辑，只做 step 图编排 + 薄委托。
+  再四出口决策（dispatch_qa / dispatch_study_plan / converse / clarify），确定性 dispatch；
+  dispatch_qa 额外产【路由计划】（`sub_queries: list[RoutedSubQuery]` + `disable_scope`）。
+- QA capability（qa_capability.QaCapability，注入）：消费门口的路由计划，QA 子问题逐个
+  判定（probe→admit→classify，含 per-subq scope）+ 按 category 路由到各分支【检索 + 流式
+  合成】；converse 子问题直接装饰 reply，不检索。本 workflow 不再自持检索/合成实质逻辑，
+  只做 step 图编排 + 薄委托。
 
 记忆分两层（关键，别混成一锅）：
 - 会话记忆：真·用户 turn + 最终答案。门口只【读】它消指代；仅在 finalize 写。
@@ -159,6 +160,8 @@ class DocQueryWorkflow(Workflow):
             return DirectReplyEvent(reply=decision.reply, action=decision.action)
         # dispatch_qa（含降级）—— memory/book_titles 在 route 顶部已取
         await ctx.store.set("clean_query", decision.clean_query)
+        await ctx.store.set("sub_queries", decision.sub_queries)
+        await ctx.store.set("disable_scope", decision.disable_scope)
         return SplitAnswerEvent()
 
     # ── 分支：dispatch 到 QA capability（薄委托），各分支统一收成 FinalizeEvent ──
@@ -178,11 +181,12 @@ class DocQueryWorkflow(Workflow):
 
     @step
     async def split_answer(self, ctx: Context, ev: SplitAnswerEvent) -> FinalizeEvent:
-        # dispatch_qa → 委托 QA capability 统一编排：拆分子问题 + 判定 + 按序执行 + 合并装饰。
-        clean_query = await ctx.store.get("clean_query")
+        # dispatch_qa → 委托 QA capability 统一编排：消费门口路由计划 + 判定 + 按序执行 + 合并装饰。
+        sub_queries = await ctx.store.get("sub_queries")
         book_titles = await ctx.store.get("book_titles")
+        disable_scope = await ctx.store.get("disable_scope", False)
         answer, nodes, meta = await self.qa.answer(
-            ctx, clean_query, book_titles, probe=self._probe
+            ctx, sub_queries, book_titles, probe=self._probe, disable_scope=disable_scope
         )
         await ctx.store.set("qa_meta", meta)
         return FinalizeEvent(answer=answer, source_nodes=nodes)

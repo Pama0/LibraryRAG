@@ -436,7 +436,7 @@ async def test_probe_retriever_defaults_to_vector_and_no_reranker():
 
 
 async def _run_decide(qa, query="openclaw", books=None):
-    async def fake_admit(query, passages):
+    async def fake_admit(query, passages, nodes=None):
         from core.workflow.admitter import AdmitVerdict
         return AdmitVerdict(verdict="ok")
 
@@ -962,7 +962,7 @@ def _qa_for_decide():
 
 async def test_decide_subq_out_of_scope_short_circuits_classify():
     qa = _qa_for_decide()
-    async def fake_admit(q, passages): return AdmitVerdict(verdict="out_of_scope", reason="库外")
+    async def fake_admit(q, passages, nodes=None): return AdmitVerdict(verdict="out_of_scope", reason="库外")
     qa.admitter.run = fake_admit
     async def boom(q, e): raise AssertionError("classify 不该被调用")
     qa.classifier.run = boom
@@ -973,7 +973,7 @@ async def test_decide_subq_out_of_scope_short_circuits_classify():
 
 async def test_decide_subq_missing_info_carries_clarify():
     qa = _qa_for_decide()
-    async def fake_admit(q, passages):
+    async def fake_admit(q, passages, nodes=None):
         return AdmitVerdict(verdict="missing_info", reason="指代不明", clarify_question="你说的索引指哪个？")
     qa.admitter.run = fake_admit
     d = await qa._decide_subq("这个索引的应用场景", None)
@@ -983,7 +983,7 @@ async def test_decide_subq_missing_info_carries_clarify():
 
 async def test_decide_subq_ok_runs_classifier():
     qa = _qa_for_decide()
-    async def fake_admit(q, passages): return AdmitVerdict(verdict="ok")
+    async def fake_admit(q, passages, nodes=None): return AdmitVerdict(verdict="ok")
     qa.admitter.run = fake_admit
     async def fake_classify(q, e): return ClassifyResult("complex", "多跳")
     qa.classifier.run = fake_classify
@@ -1148,17 +1148,14 @@ async def test_answer_multi_subject_explain_out_of_scope_does_not_abort_turn():
     # 回归（Critical）：多子问题中一个 explain 抛 OutOfScope，整轮不能被中断，
     # 兄弟子问题答案必须出现在最终返回文本里。
     from core.workflow.qa_capability import _SubDecision
+    from core.workflow.front_door import RoutedSubQuery
     qa = _qa()
-
-    async def fake_split(cq):
-        return ["讲讲PG的MVCC", "MySQL有哪些锁"]
-    qa.split_query = fake_split
 
     ds = {
         "讲讲PG的MVCC": _SubDecision("讲讲PG的MVCC", "ok", category="explain"),
         "MySQL有哪些锁": _SubDecision("MySQL有哪些锁", "ok", category="simple"),
     }
-    async def fake_decide(q, bt, probe=True):
+    async def fake_decide(q, bt, probe=True, disable_scope=False):
         return ds[q]
     qa._decide_subq = fake_decide
 
@@ -1175,7 +1172,11 @@ async def test_answer_multi_subject_explain_out_of_scope_does_not_abort_turn():
     qa.retrieve = fake_retrieve
 
     ctx = FakeCtx()
-    ans, nodes, meta = await qa.answer(ctx, "讲讲PG的MVCC和MySQL有哪些锁", None)
+    routed = [
+        RoutedSubQuery("讲讲PG的MVCC", "dispatch_qa"),
+        RoutedSubQuery("MySQL有哪些锁", "dispatch_qa"),
+    ]
+    ans, nodes, meta = await qa.answer(ctx, routed, None)
 
     # 整轮未被中断：simple 兄弟答案在文本里
     assert "锁有X" in ans
@@ -1250,24 +1251,27 @@ async def test_execute_simple_escalation_exception_falls_back_to_retrieve():
 
 
 def _qa_answer_stub(decisions, exec_map):
-    """decisions: list[_SubDecision]; exec_map: {query: (answer, nodes)}。"""
-    from core.workflow.qa_capability import _SubDecision  # noqa
+    """decisions: list[_SubDecision]; exec_map: {query: (answer, nodes)}。
+
+    返回 (qa, routed)：routed 是与 decisions 同序的 [RoutedSubQuery]（全 dispatch_qa），
+    供 qa.answer 消费（Task 4：answer 改吃路由计划，不再自己 split）。
+    """
+    from core.workflow.front_door import RoutedSubQuery
     qa = _qa()
-    async def fake_split(cq): return [d.query for d in decisions]
-    qa.split_query = fake_split
     di = {d.query: d for d in decisions}
-    async def fake_decide(q, bt, probe=True): return di[q]
+    async def fake_decide(q, bt, probe=True, disable_scope=False): return di[q]
     qa._decide_subq = fake_decide
-    async def fake_exec(ctx, q, cat, bt): return exec_map[q]
+    async def fake_exec(ctx, q, cat, scope): return exec_map[q]
     qa._execute_subq = fake_exec
-    return qa
+    routed = [RoutedSubQuery(d.query, "dispatch_qa") for d in decisions]
+    return qa, routed
 
 
 async def test_answer_single_ok_no_decoration():
     from core.workflow.qa_capability import _SubDecision
     d = _SubDecision("什么是B+树", "ok", category="explain")
-    qa = _qa_answer_stub([d], {"什么是B+树": ("B+树是…", ["n"])})
-    ans, nodes, meta = await qa.answer(FakeCtx(), "什么是B+树", None)
+    qa, routed = _qa_answer_stub([d], {"什么是B+树": ("B+树是…", ["n"])})
+    ans, nodes, meta = await qa.answer(FakeCtx(), routed, None)
     assert ans == "B+树是…"
     assert "##" not in ans            # 单问题不加分节标题
     assert meta["category"] == "explain"
@@ -1278,8 +1282,8 @@ async def test_answer_multi_ok_sections_joined():
     from core.workflow.qa_capability import _SubDecision
     ds = [_SubDecision("MySQL锁", "ok", category="simple"),
           _SubDecision("Redis持久化", "ok", category="explain")]
-    qa = _qa_answer_stub(ds, {"MySQL锁": ("锁有X", ["a"]), "Redis持久化": ("RDB/AOF", ["b"])})
-    ans, nodes, meta = await qa.answer(FakeCtx(), "讲讲MySQL锁和Redis持久化", None)
+    qa, routed = _qa_answer_stub(ds, {"MySQL锁": ("锁有X", ["a"]), "Redis持久化": ("RDB/AOF", ["b"])})
+    ans, nodes, meta = await qa.answer(FakeCtx(), routed, None)
     assert "锁有X" in ans and "RDB/AOF" in ans
     assert nodes == ["a", "b"]
     assert meta["category"] == "multi"
@@ -1290,8 +1294,8 @@ async def test_answer_partial_out_of_scope_appends_hint():
     from core.workflow.qa_capability import _SubDecision
     ds = [_SubDecision("MySQL锁", "ok", category="simple"),
           _SubDecision("OpenCL的session", "out_of_scope", reason="库外")]
-    qa = _qa_answer_stub(ds, {"MySQL锁": ("锁有X", ["a"])})
-    ans, nodes, meta = await qa.answer(FakeCtx(), "MySQL锁和OpenCL的session", None)
+    qa, routed = _qa_answer_stub(ds, {"MySQL锁": ("锁有X", ["a"])})
+    ans, nodes, meta = await qa.answer(FakeCtx(), routed, None)
     assert "锁有X" in ans
     assert "OpenCL的session" in ans       # 末尾提示该子问题不在库
     assert nodes == ["a"]
@@ -1301,16 +1305,16 @@ async def test_answer_partial_missing_info_appends_clarify():
     from core.workflow.qa_capability import _SubDecision
     ds = [_SubDecision("MySQL锁", "ok", category="simple"),
           _SubDecision("这个索引的场景", "missing_info", clarify_question="指哪个索引？")]
-    qa = _qa_answer_stub(ds, {"MySQL锁": ("锁有X", ["a"])})
-    ans, _, _ = await qa.answer(FakeCtx(), "MySQL锁和这个索引的场景", None)
+    qa, routed = _qa_answer_stub(ds, {"MySQL锁": ("锁有X", ["a"])})
+    ans, _, _ = await qa.answer(FakeCtx(), routed, None)
     assert "锁有X" in ans and "指哪个索引？" in ans
 
 
 async def test_answer_all_out_of_scope_pure_refusal():
     from core.workflow.qa_capability import _SubDecision, REFUSAL_TEXT
     ds = [_SubDecision("PG的MVCC", "out_of_scope", reason="库外")]
-    qa = _qa_answer_stub(ds, {})
-    ans, nodes, meta = await qa.answer(FakeCtx(), "PG的MVCC", None)
+    qa, routed = _qa_answer_stub(ds, {})
+    ans, nodes, meta = await qa.answer(FakeCtx(), routed, None)
     assert ans == REFUSAL_TEXT
     assert nodes == []
 
@@ -1320,9 +1324,9 @@ async def test_answer_multi_streams_match_returned_text():
     from core.workflow.qa_capability import _SubDecision
     ds = [_SubDecision("MySQL锁", "ok", category="simple"),
           _SubDecision("OpenCL的session", "out_of_scope", reason="库外")]
-    qa = _qa_answer_stub(ds, {"MySQL锁": ("锁有X", ["a"])})
+    qa, routed = _qa_answer_stub(ds, {"MySQL锁": ("锁有X", ["a"])})
     ctx = FakeCtx()
-    ans, _, _ = await qa.answer(ctx, "MySQL锁和OpenCL的session", None)
+    ans, _, _ = await qa.answer(ctx, routed, None)
     streamed = [e.delta for e in ctx.events if isinstance(e, AnswerDeltaEvent)]
     assert streamed                                   # 标题/末尾被流式
     # 返回文本被 strip，所以流式内容（可能带 \n）需要 strip 后再比对
@@ -1330,3 +1334,146 @@ async def test_answer_multi_streams_match_returned_text():
         assert d.strip() in ans                      # 每段流式内容都在返回文本里
     assert any("## MySQL锁" in d for d in streamed)    # ok 子问题分节标题被流式
     assert any("OpenCL的session" in d for d in streamed)  # 末尾"不在库"提示被流式
+
+
+# ── answer 消费路由计划 + per-subq scope（Task 4）──────────────────────
+from core.workflow.front_door import RoutedSubQuery
+
+
+async def test_answer_consumes_routed_subqueries_per_subq_scope():
+    # 两 QA 子问题，各自 admit 算出不同 scope，execute 收到各自 scope
+    qa = _qa()
+    exec_scopes = []
+
+    async def fake_decide(q, book_titles, probe=True, disable_scope=False):
+        from core.workflow.qa_capability import _SubDecision
+        scope = ["MySQL"] if "MySQL" in q else ["openclaw"]
+        return _SubDecision(q, "ok", category="simple", scope=scope)
+    qa._decide_subq = fake_decide
+
+    async def fake_execute(ctx, q, category, scope):
+        exec_scopes.append((q, scope))
+        return f"[{q}]", ["n"]
+    qa._execute_subq = fake_execute
+
+    routed = [
+        RoutedSubQuery("讲讲MySQL", "dispatch_qa"),
+        RoutedSubQuery("openclaw的gateway", "dispatch_qa"),
+    ]
+    ans, nodes, meta = await qa.answer(FakeCtx(), routed, None)
+    assert ("讲讲MySQL", ["MySQL"]) in exec_scopes
+    assert ("openclaw的gateway", ["openclaw"]) in exec_scopes
+    assert "[讲讲MySQL]" in ans and "[openclaw的gateway]" in ans
+    assert meta["sub_count"] == 2
+
+
+async def test_answer_converse_subquery_decorated_without_retrieval():
+    qa = _qa()
+
+    async def fake_execute(ctx, q, category, scope):
+        assert q != "编个童话故事", "converse 子问题不应进 execute"
+        return f"[{q}]", ["n"]
+    qa._execute_subq = fake_execute
+
+    async def fake_decide(q, book_titles, probe=True, disable_scope=False):
+        from core.workflow.qa_capability import _SubDecision
+        return _SubDecision(q, "ok", category="simple", scope=["MySQL"])
+    qa._decide_subq = fake_decide
+
+    routed = [
+        RoutedSubQuery("讲讲MySQL", "dispatch_qa"),
+        RoutedSubQuery("编个童话故事", "converse", "我是书籍知识库助手，没法编童话～"),
+    ]
+    ans, _nodes, _meta = await qa.answer(FakeCtx(), routed, None)
+    assert "没法编童话" in ans
+    assert "知识库里暂未收录" not in ans       # 不当失败检索拒
+
+
+async def test_answer_single_subquery_no_section_heading():
+    # 单子问题 → 裸答，无 "## 标题"（回归）
+    qa = _qa()
+
+    async def fake_decide(q, book_titles, probe=True, disable_scope=False):
+        from core.workflow.qa_capability import _SubDecision
+        return _SubDecision(q, "ok", category="simple", scope=None)
+    qa._decide_subq = fake_decide
+
+    async def fake_execute(ctx, q, category, scope):
+        return "正文", ["n"]
+    qa._execute_subq = fake_execute
+
+    ans, _n, _m = await qa.answer(FakeCtx(), [RoutedSubQuery("MySQL锁", "dispatch_qa")], None)
+    assert ans == "正文"
+    assert "## " not in ans
+
+
+async def test_decide_subq_uses_admit_scope_in_full_library():
+    # 全库（book_titles=None, 非 disable）→ scope 来自 admit
+    qa = _qa()
+
+    async def fake_probe(q, bt):
+        return ["node"]
+    qa._probe_retrieve = fake_probe
+    qa._format_probe = lambda nodes, bt: "evidence"
+
+    async def fake_admit(q, passages, nodes=None):
+        return AdmitVerdict(verdict="ok", scope=["MySQL"])
+    qa.admitter.run = fake_admit
+
+    async def fake_classify(q, evidence):
+        return ClassifyResult("simple")
+    qa.classifier.run = fake_classify
+
+    d = await qa._decide_subq("讲讲MySQL", None, probe=True, disable_scope=False)
+    assert d.verdict == "ok"
+    assert d.scope == ["MySQL"]
+
+
+async def test_decide_subq_user_books_override_scope():
+    # 手选书 → scope=手选，admit 不自动算（nodes 不喂 admit 做 scope）
+    qa = _qa()
+
+    async def fake_probe(q, bt):
+        return ["node"]
+    qa._probe_retrieve = fake_probe
+    qa._format_probe = lambda nodes, bt: "evidence"
+
+    seen = {}
+
+    async def fake_admit(q, passages, nodes=None):
+        seen["nodes"] = nodes
+        return AdmitVerdict(verdict="ok")
+    qa.admitter.run = fake_admit
+
+    async def fake_classify(q, evidence):
+        return ClassifyResult("simple")
+    qa.classifier.run = fake_classify
+
+    d = await qa._decide_subq("讲讲MySQL", ["高性能MySQL"], probe=True, disable_scope=False)
+    assert d.scope == ["高性能MySQL"]
+    assert seen["nodes"] is None        # 手选 → 不让 admit 自动算 scope
+
+
+async def test_decide_subq_disable_scope_skips_auto_scope():
+    # disable_scope=True（用户要求全库）→ 即便 book_titles=None 也不自动算 scope
+    qa = _qa()
+
+    async def fake_probe(q, bt):
+        return ["node"]
+    qa._probe_retrieve = fake_probe
+    qa._format_probe = lambda nodes, bt: "evidence"
+
+    seen = {}
+
+    async def fake_admit(q, passages, nodes=None):
+        seen["nodes"] = nodes
+        return AdmitVerdict(verdict="ok")
+    qa.admitter.run = fake_admit
+
+    async def fake_classify(q, evidence):
+        return ClassifyResult("simple")
+    qa.classifier.run = fake_classify
+
+    d = await qa._decide_subq("讲讲MySQL", None, probe=True, disable_scope=True)
+    assert d.scope is None
+    assert seen["nodes"] is None

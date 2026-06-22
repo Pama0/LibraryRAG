@@ -68,15 +68,23 @@ async def test_dispatch_qa_goes_through_split_answer():
     wf = _wf(llm)
 
     async def fake_front(original, memory, bt):
-        from core.workflow.front_door import FrontDoorDecision
+        from core.workflow.front_door import FrontDoorDecision, RoutedSubQuery
         return FrontDoorDecision(
             "dispatch_qa",
             clean_query="讲讲MySQL锁和Redis持久化",
             disable_scope=True,
+            sub_queries=[
+                RoutedSubQuery("MySQL锁", "dispatch_qa"),
+                RoutedSubQuery("Redis持久化", "dispatch_qa"),
+            ],
         )
     wf.front_door.run = fake_front
 
-    async def fake_answer(ctx, cq, bt, probe=True):
+    captured = {}
+
+    async def fake_answer(ctx, sub_queries, bt, probe=True, disable_scope=False):
+        captured["sub_queries"] = sub_queries
+        captured["disable_scope"] = disable_scope
         return (
             "合并答案",
             ["n1"],
@@ -88,18 +96,21 @@ async def test_dispatch_qa_goes_through_split_answer():
     assert result.response == "合并答案"
     assert result.metadata["category"] == "multi"
     assert result.source_nodes == ["n1"]
+    assert len(captured["sub_queries"]) >= 1     # route 计划经 ctx 透传到 split_answer
+    assert captured["disable_scope"] is True     # front_door 的 disable_scope 一并透传
 
 
 async def test_qa_intent_feeds_clean_query_and_scope_to_answer():
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "MySQL索引有哪些"}',
+        '{"sub_queries":[{"query":"MySQL索引有哪些","action":"dispatch_qa","reply":""}]}',
     ])
     wf = _wf(llm)
 
     captured = {}
 
-    async def fake_answer(ctx, cq, bt, probe=True):
-        captured["query"] = cq
+    async def fake_answer(ctx, sub_queries, bt, probe=True, disable_scope=False):
+        captured["sub_queries"] = sub_queries
         captured["book_titles"] = bt
         return "答案", ["n1"], {"category": "simple"}
     wf.qa.answer = fake_answer
@@ -107,7 +118,8 @@ async def test_qa_intent_feeds_clean_query_and_scope_to_answer():
     mem = FakeMemory([_Msg("user", "MySQL索引"), _Msg("assistant", "B+树……")])
     result = await wf.run(query="它有哪些", memory=mem, book_titles=["高性能MySQL"])
 
-    assert captured["query"] == "MySQL索引有哪些"     # clean/降噪后，不是原始"它有哪些"
+    # clean/降噪后，不是原始"它有哪些"
+    assert captured["sub_queries"][0].query == "MySQL索引有哪些"
     assert captured["book_titles"] == ["高性能MySQL"]  # scope 透传到 answer
     assert str(result.response) == "答案"
     assert result.source_nodes == ["n1"]
@@ -117,10 +129,11 @@ async def test_route_passes_selected_books_to_router():
     # 用户选中的书 scope 要喂给门口 Router，用于把"这本书"补全
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "《openclaw》讲了什么"}',
+        '{"sub_queries":[{"query":"《openclaw》讲了什么","action":"dispatch_qa","reply":""}]}',
     ])
     wf = _wf(llm)
 
-    async def fake_answer(ctx, cq, bt, probe=True):
+    async def fake_answer(ctx, sub_queries, bt, probe=True, disable_scope=False):
         return "答案", [], {"category": "simple"}
     wf.qa.answer = fake_answer
 
@@ -131,13 +144,14 @@ async def test_route_passes_selected_books_to_router():
 async def test_qa_consumes_clean_query_not_original():
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "MySQL索引有哪些"}',
+        '{"sub_queries":[{"query":"MySQL索引有哪些","action":"dispatch_qa","reply":""}]}',
     ])
     wf = _wf(llm)
 
     captured = {}
 
-    async def fake_answer(ctx, cq, bt, probe=True):
-        captured["clean"] = cq
+    async def fake_answer(ctx, sub_queries, bt, probe=True, disable_scope=False):
+        captured["clean"] = sub_queries[0].query
         return "答案", [], {"category": "simple"}
     wf.qa.answer = fake_answer
 
@@ -154,23 +168,25 @@ async def test_router_parse_failure_defaults_to_qa_path():
 
     captured = {}
 
-    async def fake_answer(ctx, cq, bt, probe=True):
-        captured["query"] = cq
+    async def fake_answer(ctx, sub_queries, bt, probe=True, disable_scope=False):
+        captured["sub_queries"] = sub_queries
         return "答案", [], {"category": "simple"}
     wf.qa.answer = fake_answer
 
     await wf.run(query="B+树索引", memory=FakeMemory())
-    assert llm.calls == 1
-    assert captured["query"] == "B+树索引"
+    assert llm.calls == 1   # 门口解析失败直接降级，不会进入二次拆分调用
+    assert len(captured["sub_queries"]) == 1
+    assert captured["sub_queries"][0].query == "B+树索引"
 
 
 async def test_finalize_exposes_qa_meta_in_metadata():
     llm = FakeLLM([
         '{"action": "dispatch_qa", "clean_query": "MySQL锁"}',
+        '{"sub_queries":[{"query":"MySQL锁","action":"dispatch_qa","reply":""}]}',
     ])
     wf = _wf(llm)
 
-    async def fake_answer(ctx, cq, bt, probe=True):
+    async def fake_answer(ctx, sub_queries, bt, probe=True, disable_scope=False):
         return "答案", ["n1"], {"category": "simple", "categories": ["simple"], "sub_count": 1}
     wf.qa.answer = fake_answer
 
@@ -186,7 +202,7 @@ async def test_converse_responds_without_retrieval_or_qa():
     wf = _wf(llm)
     called = {"answer": False}
 
-    async def fake_answer(ctx, cq, bt, probe=True):
+    async def fake_answer(ctx, sub_queries, bt, probe=True, disable_scope=False):
         called["answer"] = True
         return "不应被调用", [], {}
     wf.qa.answer = fake_answer
@@ -233,7 +249,7 @@ async def test_library_listing_routes_to_converse_tool_without_retrieval():
 
     answer_called = {"v": False}
 
-    async def fake_answer(ctx, cq, bt, probe=True):
+    async def fake_answer(ctx, sub_queries, bt, probe=True, disable_scope=False):
         answer_called["v"] = True
         return "不应被调用", [], {}
     wf.qa.answer = fake_answer
@@ -261,7 +277,7 @@ async def test_library_count_question_routes_to_converse_tool_count_only():
     ])
     wf = DocQueryWorkflow(index_manager=im, llm=llm, similarity_top_k=3, timeout=10)
 
-    async def fake_answer(ctx, cq, bt, probe=True):
+    async def fake_answer(ctx, sub_queries, bt, probe=True, disable_scope=False):
         raise AssertionError("元查询不应进 QA")
     wf.qa.answer = fake_answer
 
@@ -276,12 +292,15 @@ async def test_library_count_question_routes_to_converse_tool_count_only():
 # ── 全库不预收窄（Task 1：移除 scoper 后）──────────────────────────────
 async def test_full_library_not_narrowed_passes_none_book_titles():
     # 未手选书 → book_titles 全程为 None（全库），不再有任何预收窄
-    llm = FakeLLM(['{"action":"dispatch_qa","clean_query":"讲讲MySQL和openclaw的gateway"}'])
+    llm = FakeLLM([
+        '{"action":"dispatch_qa","clean_query":"讲讲MySQL和openclaw的gateway"}',
+        '{"sub_queries":[{"query":"讲讲MySQL和openclaw的gateway","action":"dispatch_qa","reply":""}]}',
+    ])
     wf = _wf(llm)
 
     captured = {}
 
-    async def fake_answer(ctx, cq, bt, probe=True):
+    async def fake_answer(ctx, sub_queries, bt, probe=True, disable_scope=False):
         captured["book_titles"] = bt
         return "答案", [], {"category": "multi"}
     wf.qa.answer = fake_answer
