@@ -1,4 +1,6 @@
 """Admitter（可答性判定单元）单测：mock LLM 控返回，验解析/降级/证据进 prompt。"""
+from llama_index.core.schema import NodeWithScore, TextNode
+
 from core.workflow.admitter import Admitter, AdmitVerdict
 
 
@@ -88,3 +90,50 @@ async def test_run_strips_fenced_json():
     llm = FakeLLM(['```json\n{"verdict":"ok"}\n```'])
     v = await _adm(llm).run("MySQL锁", ["片段"])
     assert v.verdict == "ok"
+
+
+def _nodes(books):
+    return [
+        NodeWithScore(node=TextNode(text="x", id_=str(i), metadata={"book_title": b}))
+        for i, b in enumerate(books)
+    ]
+
+
+async def test_scope_single_dominant_book():
+    llm = FakeLLM(['{"verdict":"ok"}'])
+    v = await _adm(llm).run("讲讲MySQL", ["片段"], nodes=_nodes(["MySQL"] * 6 + ["X"] * 2))
+    assert v.verdict == "ok"
+    assert v.scope == ["MySQL"]
+
+
+async def test_scope_two_books_when_concept_spans():
+    llm = FakeLLM(['{"verdict":"ok"}'])
+    v = await _adm(llm).run("讲讲索引", ["片段"], nodes=_nodes(["A"] * 4 + ["B"] * 3 + ["C"] * 1))
+    assert v.scope == ["A", "B"]
+
+
+async def test_scope_none_when_diffuse():
+    llm = FakeLLM(['{"verdict":"ok"}'])
+    v = await _adm(llm).run("q", ["片段"], nodes=_nodes(["A"] * 3 + ["B"] * 3 + ["C"] * 2))
+    assert v.scope is None
+
+
+async def test_scope_none_when_no_nodes():
+    llm = FakeLLM(['{"verdict":"ok"}'])
+    v = await _adm(llm).run("q", ["片段"], nodes=[])
+    assert v.scope is None
+
+
+async def test_scope_none_when_nodes_arg_omitted():
+    # 旧调用方不传 nodes → scope=None，行为不变（回归）
+    llm = FakeLLM(['{"verdict":"ok"}'])
+    v = await _adm(llm).run("q", ["片段"])
+    assert v.scope is None
+
+
+async def test_scope_none_on_verdict_parse_failure():
+    # LLM 坏 → 降级 ok，scope 仍可从 nodes 算出（verdict 与 scope 解耦）
+    llm = FakeLLM(["这不是JSON"])
+    v = await _adm(llm).run("讲讲MySQL", ["片段"], nodes=_nodes(["MySQL"] * 6))
+    assert v.verdict == "ok"
+    assert v.scope == ["MySQL"]
