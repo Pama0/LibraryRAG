@@ -1,6 +1,0 @@
-user_input,reference,model_response,correctness_score,correctness_reason
-保安服务公司的法定代表人变更后，需要办理哪些手续？,保安服务公司的法定代表人变更后，应当经原审批公安机关审核，并持审核文件到工商行政管理机关办理变更登记。,Empty Response,fail,The model response does not contain any information about the required procedures for a change in the legal representative of a security service company.
-保安服务公司法定代表人和主要管理人员有哪些任职要求？,保安服务公司法定代表人和主要管理人员应当具备任职所需的专业知识和有关业务工作经验，且无被刑事处罚、劳动教养、收容教育、强制隔离戒毒或者被开除公职、开除军籍等不良记录。,Empty Response,fail,The model response does not contain any information related to the question asked.
-收容教育在保安员证申领中有什么规定？,根据第四章第十七条的规定，有下列情形之一的，不得担任保安员：（一）曾被收容教育、强制隔离戒毒、劳动教养或者3次以上行政拘留的。,Empty Response,fail,The model response is empty and does not provide any information.
-县级以上地方人民政府在保安服务活动中扮演什么角色？,县级以上地方人民政府公安机关负责本行政区域内保安服务活动的监督管理工作。,Empty Response,fail,The model response is empty and does not contain any information about the role of county-level or higher local people's governments in security service activities.
-根据《娱乐场所管理条例》，娱乐场所应当如何聘用保安员？,根据《娱乐场所管理条例》，娱乐场所应当依照规定，从保安服务公司聘用保安员，不得自行招用保安员。,Empty Response,fail,The model response is empty and does not provide any information.

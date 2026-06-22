@@ -27,6 +27,9 @@ storage/
 # 运行时日志
 logs/
 
+# workflow 可视化产物（脚本生成，随时重生）
+docs/workflow_diagrams/
+
 # ablation 评测产物（脚本和 questions.json 保留，结果不提交）
 eval/ablation_results.json
 eval/ablation_report.md
@@ -53,6 +56,7 @@ workflow_learn/
 
 # Claude Code 本地配置
 .claude/
+CLAUDE.md
 
 # eval 生成的临时产物
 eval/dataset/_gen_run.log

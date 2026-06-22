@@ -38,7 +38,8 @@ from llama_index.core.workflow import (
     step,
 )
 
-from core.workflow.front_door import FrontDoorAgent
+from core.workflow.components.new_front_door import FrontDoor
+from core.workflow.front_door import FrontDoorAgent, RoutedSubQuery
 from core.workflow.qa_capability import (  # noqa: F401  (事件类 re-export 供 api 层 import)
     AnswerDeltaEvent,
     EmptySkeleton,
@@ -58,8 +59,14 @@ logger = logging.getLogger(__name__)
 
 
 # ── 流程事件（驱动 workflow step 图）─────────────────────────────────
+class CleanEvent(Event):
+    """start → lean。纯信号；query 从 ctx 取。"""
+
+class SplitEvent(Event):
+    """clean → split（净化 + 意图分类）。纯信号；query 从 ctx 取。"""
+
 class RouteEvent(Event):
-    """start → 门口 Router（净化 + 意图分类）。纯信号；query 从 ctx 取。"""
+    """split → router（意图分类)。纯信号；query 从 ctx 取。"""
 
 
 class StudyPlanEvent(Event):
@@ -73,8 +80,8 @@ class DirectReplyEvent(Event):
     action: str = ""
 
 
-class SplitAnswerEvent(Event):
-    """dispatch_qa → 多子问题拆分 + 编排作答。纯信号；clean_query 从 ctx 取。"""
+class QaEvent(Event):
+    """dispatch_qa → 消费路由计划 + 编排作答。纯信号；sub_queries 从 ctx 取。"""
 
 
 class FinalizeEvent(Event):
@@ -85,7 +92,7 @@ class FinalizeEvent(Event):
 
 
 class DocQueryWorkflow(Workflow):
-    """文档库顶层 query 编排：route(门口) → split_answer(QA 拆分+编排作答) → finalize。"""
+    """文档库顶层 query 编排：route(门口) → qa_branch(消费路由计划+编排作答) → finalize。"""
 
     def __init__(
         self,
@@ -112,6 +119,10 @@ class DocQueryWorkflow(Workflow):
         self.front_door = FrontDoorAgent(
             llm, index_manager, probe_retriever=make_retriever(probe_retriever)
         )
+        # 新门口（净化/拆分解耦版），逐步取代 FrontDoorAgent；先并存，老的暂不删。
+        self.new_front_door = FrontDoor(
+            llm, index_manager, probe_retriever=make_retriever(probe_retriever)
+        )
         self.qa = QaCapability(
             index_manager, llm, similarity_top_k, max_sub_queries,
             reranker=make_reranker(reranker),
@@ -133,38 +144,67 @@ class DocQueryWorkflow(Workflow):
 
     # ── 入口：把 memory + 原始 query + scope 全塞进 ctx，贯穿全程 ──
     @step
-    async def start(self, ctx: Context, ev: StartEvent) -> RouteEvent:
+    async def start(self, ctx: Context, ev: StartEvent) -> CleanEvent:
         # memory 是调用方（API handler）从 DB 重建的 ChatMemoryBuffer
         await ctx.store.set("memory", getattr(ev, "memory", None))
         await ctx.store.set("original_query", ev.query)  # 工作态：用户原话
         await ctx.store.set("book_titles", getattr(ev, "book_titles", None))
         await ctx.store.set("allow_clarify", getattr(ev, "allow_clarify", True))
+        return CleanEvent()
+
+    @step
+    async def clean_question(self,ctx: Context, ev: CleanEvent) -> SplitEvent | DirectReplyEvent:
+        original = await ctx.store.get("original_query")
+        memory: Optional[ChatMemoryBuffer] = await ctx.store.get("memory")
+        clean_query, is_missing_info, missing_reason = await self.new_front_door.clean(
+            original, memory
+        )
+        # 缺信息（指代无法消解等）→ 不进检索，直接反问用户补全
+        if is_missing_info:
+            return DirectReplyEvent(reply=missing_reason, action="clarify")
+        await ctx.store.set("clean_query", clean_query)
+        return SplitEvent()
+
+    @step
+    async def split_query(self, ctx: Context, ev: SplitEvent) -> RouteEvent:
+        clean_query = await ctx.store.get("clean_query")
+        book_titles = await ctx.store.get("book_titles")
+        subs = await self.new_front_door.split_query(clean_query, book_titles)
+        await ctx.store.set("sub_queries", subs)
         return RouteEvent()
 
-    # ── 门口准入决策：读会话记忆做净化 + 四出口决策，确定性 dispatch。 ──
     @step
     async def route(
         self, ctx: Context, ev: RouteEvent
-    ) -> "SplitAnswerEvent | StudyPlanEvent | DirectReplyEvent":
-        original = await ctx.store.get("original_query")
-        memory: Optional[ChatMemoryBuffer] = await ctx.store.get("memory")
-        book_titles = await ctx.store.get("book_titles")
+    ) -> "QaEvent | StudyPlanEvent | DirectReplyEvent":
+        sub_texts = await ctx.store.get("sub_queries")     # split_query 存的 list[str]
+        clean_query = await ctx.store.get("clean_query")
 
-        decision = await self.front_door.run(original, memory, book_titles)
+        rr = await self.new_front_door.route(sub_texts)    # _RouteResultModel
+        routes = rr.routes
 
+        # 聚合优先级：任一 dispatch_qa → QA；否则 study_plan → converse。
         # 工作态落 ctx：action 供观测；clean_query 是门口横切产物，绝不写会话记忆。
-        await ctx.store.set("action", decision.action)
+        if any(r.action == "dispatch_qa" for r in routes):
+            # 非 qa 子问题降为 converse 装饰（reply 留空，由后续兜底处理）
+            subs = [
+                RoutedSubQuery(r.query, "dispatch_qa") if r.action == "dispatch_qa"
+                else RoutedSubQuery(r.query, "converse")
+                for r in routes
+            ]
+            await ctx.store.set("action", "dispatch_qa")
+            await ctx.store.set("sub_queries", subs)       # 覆写成 list[RoutedSubQuery]
+            return QaEvent()
 
-        if decision.action == "dispatch_study_plan":
-            await ctx.store.set("clean_query", decision.clean_query)
+        study = next((r for r in routes if r.action == "study_plan"), None)
+        if study is not None:
+            await ctx.store.set("action", "dispatch_study_plan")
+            await ctx.store.set("clean_query", study.query or clean_query)
             return StudyPlanEvent()
-        if decision.action in ("converse", "clarify"):
-            return DirectReplyEvent(reply=decision.reply, action=decision.action)
-        # dispatch_qa（含降级）—— memory/book_titles 在 route 顶部已取
-        await ctx.store.set("clean_query", decision.clean_query)
-        await ctx.store.set("sub_queries", decision.sub_queries)
-        await ctx.store.set("disable_scope", decision.disable_scope)
-        return SplitAnswerEvent()
+
+        # 全 converse —— reply 留空，由后续兜底处理
+        await ctx.store.set("action", "converse")
+        return DirectReplyEvent(reply="", action="converse")
 
     # ── 分支：dispatch 到 QA capability（薄委托），各分支统一收成 FinalizeEvent ──
     @step
@@ -182,7 +222,7 @@ class DocQueryWorkflow(Workflow):
         return FinalizeEvent(answer=ev.reply, source_nodes=[])
 
     @step
-    async def split_answer(self, ctx: Context, ev: SplitAnswerEvent) -> FinalizeEvent:
+    async def qa_branch(self, ctx: Context, ev: QaEvent) -> FinalizeEvent:
         # dispatch_qa → 委托 QA capability 统一编排：消费门口路由计划 + 判定 + 按序执行 + 合并装饰。
         sub_queries = await ctx.store.get("sub_queries")
         book_titles = await ctx.store.get("book_titles")
