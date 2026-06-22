@@ -273,113 +273,22 @@ async def test_library_count_question_routes_to_converse_tool_count_only():
     assert "未能读取库藏清单" not in llm.prompts[1]
 
 
-# ── ConversationScoper 接线（Task 2）──────────────────────────────────
-def test_scoper_constructed_with_probe_vector_retriever():
-    from core.workflow.conversation_scoper import ConversationScoper
-    from core.retrieval.retrieve import VectorRetriever
-    wf = DocQueryWorkflow(_StubIndexManager(), _StubLLM())
-    assert isinstance(wf.scoper, ConversationScoper)
-    assert isinstance(wf.scoper.probe_retriever, VectorRetriever)
-
-
-async def test_scoper_narrows_book_titles_in_full_library():
-    llm = FakeLLM(['{"action":"dispatch_qa","clean_query":"讲一下gateway"}'])
+# ── 全库不预收窄（Task 1：移除 scoper 后）──────────────────────────────
+async def test_full_library_not_narrowed_passes_none_book_titles():
+    # 未手选书 → book_titles 全程为 None（全库），不再有任何预收窄
+    llm = FakeLLM(['{"action":"dispatch_qa","clean_query":"讲讲MySQL和openclaw的gateway"}'])
     wf = _wf(llm)
-
-    async def fake_scope(clean_query, user_book_titles, memory):
-        from core.workflow.conversation_scoper import ScopeDecision
-        return ScopeDecision(["openclaw"], "（我按《openclaw》回答…）\n")
-    wf.scoper.run = fake_scope
 
     captured = {}
 
     async def fake_answer(ctx, cq, bt, probe=True):
         captured["book_titles"] = bt
-        return "答案", ["n1"], {"category": "simple"}
+        return "答案", [], {"category": "multi"}
     wf.qa.answer = fake_answer
 
-    await wf.run(query="讲一下gateway", memory=FakeMemory([_Msg("user", "讲讲openclaw")]))
-    assert captured["book_titles"] == ["openclaw"]      # 收窄透传到 answer
-
-
-async def test_scoper_called_with_user_books_and_result_flows():
-    llm = FakeLLM(['{"action":"dispatch_qa","clean_query":"讲一下gateway"}'])
-    wf = _wf(llm)
-
-    seen = {}
-
-    async def fake_scope(clean_query, user_book_titles, memory):
-        from core.workflow.conversation_scoper import ScopeDecision
-        seen["args"] = (clean_query, user_book_titles)
-        return ScopeDecision(user_book_titles, "")       # 模拟手选 no-op
-    wf.scoper.run = fake_scope
-
-    captured = {}
-
-    async def fake_answer(ctx, cq, bt, probe=True):
-        captured["book_titles"] = bt
-        return "答案", [], {"category": "simple"}
-    wf.qa.answer = fake_answer
-
-    await wf.run(query="讲一下gateway", memory=FakeMemory(), book_titles=["高性能MySQL"])
-    assert seen["args"] == ("讲一下gateway", ["高性能MySQL"])
-    assert captured["book_titles"] == ["高性能MySQL"]
-
-
-# ── 透明声明前缀（Task 3）─────────────────────────────────────────────
-async def test_scope_note_prepended_to_answer():
-    llm = FakeLLM(['{"action":"dispatch_qa","clean_query":"讲一下gateway"}'])
-    wf = _wf(llm)
-
-    async def fake_scope(clean_query, user_book_titles, memory):
-        from core.workflow.conversation_scoper import ScopeDecision
-        return ScopeDecision(["openclaw"], "（我按《openclaw》回答…）\n")
-    wf.scoper.run = fake_scope
-
-    async def fake_answer(ctx, cq, bt, probe=True):
-        return "正文答案", ["n1"], {"category": "simple"}
-    wf.qa.answer = fake_answer
-
-    result = await wf.run(query="讲一下gateway", memory=FakeMemory([_Msg("user", "讲讲openclaw")]))
-    resp = str(result.response)
-    assert resp.startswith("（我按《openclaw》回答")     # 声明在最前
-    assert "正文答案" in resp
-
-
-async def test_disable_scope_skips_scoper():
-    llm = FakeLLM(['{"action":"dispatch_qa","clean_query":"讲一下gateway","disable_scope":true}'])
-    wf = _wf(llm)
-
-    async def boom_scope(*a, **k):
-        raise AssertionError("disable_scope=true 时不应调用 scoper")
-    wf.scoper.run = boom_scope
-
-    captured = {}
-
-    async def fake_answer(ctx, cq, bt, probe=True):
-        captured["book_titles"] = bt
-        return "答案", [], {"category": "simple"}
-    wf.qa.answer = fake_answer
-
-    await wf.run(query="在所有书里讲一下gateway", memory=FakeMemory())
-    assert captured["book_titles"] is None        # 跳过收窄，保持全库
-
-
-async def test_no_scope_note_when_not_narrowed():
-    llm = FakeLLM(['{"action":"dispatch_qa","clean_query":"讲一下gateway"}'])
-    wf = _wf(llm)
-
-    async def fake_scope(clean_query, user_book_titles, memory):
-        from core.workflow.conversation_scoper import ScopeDecision
-        return ScopeDecision(None, "")                    # 不收窄
-    wf.scoper.run = fake_scope
-
-    async def fake_answer(ctx, cq, bt, probe=True):
-        return "正文答案", [], {"category": "simple"}
-    wf.qa.answer = fake_answer
-
-    result = await wf.run(query="讲一下gateway", memory=FakeMemory())
-    assert str(result.response) == "正文答案"             # 无前缀
+    await wf.run(query="讲讲MySQL和openclaw的gateway", memory=FakeMemory())
+    assert captured["book_titles"] is None        # 全库，无预收窄
+    assert not hasattr(wf, "scoper")              # scoper 已从编排移除
 
 
 # ── reranker 名字 → 对象注入 QaCapability（装配单测）──────────────────
