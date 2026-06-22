@@ -1,4 +1,4 @@
-"""闭环验证：把章节摘要法产出的广题喂进真实 QaCapability.classify()，
+"""闭环验证：把章节摘要法产出的广题喂进真实 QaCapability._decide_subq()，
 看 probe 探测 + 最终 category 是否如预期路由到 pending_split。
 
 对照组放 1 道窄题（应为 retrievable），验证分类器不是"逢题都判 split"。
@@ -41,13 +41,14 @@ async def main():
         # 先单独探测，把 probe 召回信号打出来看
         nodes = await qa._retrieve_nodes(q, book_titles)
         probe = qa._format_probe(nodes, book_titles)
-        result = await qa.classify(q, book_titles=book_titles, probe=True)
+        dec = await qa._decide_subq(q, book_titles, probe=True)
+        sut_category = dec.category if dec.verdict == "ok" else dec.verdict
         print("=" * 72)
         print(f"[{tag}]")
         print(f"  Q: {q}")
         print(f"  probe召回: {len(nodes)} 段 | {probe.splitlines()[0]}")
-        print(f"  ▶ category = {result.category}")
-        print(f"  reason    = {result.reason}")
+        print(f"  ▶ category = {sut_category}")
+        print(f"  reason    = {dec.reason}")
 
 
 if __name__ == "__main__":

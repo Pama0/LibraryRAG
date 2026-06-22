@@ -1,19 +1,20 @@
 """QA capability：文档库问答的检索 + 合成实质逻辑（从 DocQueryWorkflow 抽出）。
 
 `DocQueryWorkflow` 是顶层 Router 编排，把 `intent=qa` dispatch 到这里。本类是
-注入式协作单元（与 `IntentRouter` / `QueryPreprocessor` / `QueryDecomposer` 同一
+注入式协作单元（与 `IntentRouter` / `QuerySplitter` / `QueryClassifier` 同一
 模式），【不依赖 LlamaIndex Workflow step 机制】，便于独立单测。
 
 持有：
 - 检索（`index_manager`）+ 合成（`llm`）。
-- QA 内预处理 `QueryPreprocessor`（降噪 + 难度/明确性分类）。
-- 拆解 `QueryDecomposer`（宽问题 → ≤N 子查询）。
+- 拆分 `QuerySplitter`（一句话 → ≥1 个降噪自包含子问题）。
+- 可答性闸 `Admitter`（probe 证据判 ok/missing_info/out_of_scope）+ 瘦身分类
+  `QueryClassifier`（ok 子问题判 explain/compare/simple/complex）。
 
-对外暴露（均接收 query/book_titles，返回 (answer, source_nodes)，不碰流程事件）：
-- `classify(clean_query)` → 预处理结果（category / rewritten_query / reason）。
-- `retrieve(ctx, query, book_titles)` → 单轮检索 + 流式合成。
-- `split(ctx, query, book_titles)` → 拆解-检索-map-reduce 汇总（失败降级单轮）。
-- `assume(ctx, query, book_titles)` → 角度不定：归纳评判维度 → 声明所选角度 → 逐维度检索分节（失败降级单轮）。
+对外主入口：`answer(ctx, clean_query, book_titles, probe)` —— 拆分 → 并行逐子问题判定
+（`_decide_subq`：probe → admit → classify）→ 按序执行 ok 子问题（`_execute_subq` 按
+category 分派）→ 合并装饰非 ok 子问题。单问题退化为旧单路径（无分节标题）。
+分支执行体仍独立可调：`retrieve`/`explain`/`split`/`assume`（均接收 query/book_titles，
+返回 (answer, source_nodes)）。
 
 流式：检索/合成进度通过 `ctx.write_event_to_stream` 推【流式专用事件】（本模块定义，
 `doc_workflow` re-export、api 层映射成前端 SSE）。这些事件不参与 workflow step 图。
@@ -31,11 +32,9 @@ from core.retrieval.rerank import Reranker
 from core.retrieval.retrieve import Retriever, VectorRetriever
 from core.workflow.admitter import Admitter, AdmitVerdict
 from core.workflow.chapter_tree import children, dominant_prefix, unique_chapters
-from core.workflow.query_classifier import QueryClassifier, ClassifyResult
+from core.workflow.query_classifier import QueryClassifier
 from core.workflow.query_decompose import QueryDecomposer
 from core.workflow.query_dimension import DimensionExtractor
-from core.workflow.query_gate import QueryGate
-from core.workflow.query_preprocess import QueryPreprocessor, PreprocessResult
 from core.workflow.query_splitter import QuerySplitter
 from core.workflow.answer_outliner import AnswerOutliner
 
@@ -152,14 +151,12 @@ class QaCapability:
         # 默认 vector + 不重排（rerank 会收敛召回、压扁 pending_split 依赖的章节 spread 信号）。
         self.probe_retriever = probe_retriever or VectorRetriever()
         self.probe_reranker = probe_reranker
-        self.preprocessor = QueryPreprocessor(llm)
         self.decomposer = QueryDecomposer(llm)
         self.dimensioner = DimensionExtractor(llm)
         # explain 专用：宽覆盖召回（hybrid + 大 top_k + 不重排，求覆盖不求精）
         self.explain_retriever = explain_retriever or VectorRetriever()
         self.explain_recall_k = explain_recall_k
         self.simple_escalate_min_score = simple_escalate_min_score
-        self._gate = QueryGate(llm)
         self.admitter = Admitter(llm)
         self.outliner = AnswerOutliner(llm)
         self._retrieve_concurrency = 4  # 扇出检索并发上限，防 embedding/BM25/rerank 打爆
@@ -167,44 +164,6 @@ class QaCapability:
         self.classifier = QueryClassifier(llm)
         # 有界 agent 由 doc_workflow 构造后注入（complex / simple 升级用）；None → 降级单轮
         self.qa_agent = None
-
-    async def gate(self, clean_query: str) -> tuple[str, str]:
-        """Call A：检索降噪 + 意图二判（explain / other）。委托 QueryGate。"""
-        return await self._gate.run(clean_query)
-
-    # ── 预处理：降噪 + 难度/明确性分类（不再消指代）──────────────────
-    async def classify(
-        self,
-        clean_query: str,
-        book_titles: Optional[list[str]] = None,
-        probe: bool = True,
-    ):
-        """先用 clean_query 探测召回，把召回信号喂给 admit + judge，堵住「盲判」。
-
-        probe=False（ablation baseline）→ 不探测、纯文本判定；probe 失败亦容错为空。
-        可答性闸：admit 吃 probe 证据判 ok/missing_info/out_of_scope；非 ok 短路返回该类，
-        ok 才跑瘦身分类器（4 类）。对外契约仍可出 6 类，workflow step 图不变。
-        """
-        retrieval_context = ""
-        if probe:
-            try:
-                located = await self._probe_retrieve(clean_query, book_titles)
-                retrieval_context = self._format_probe(located, book_titles)
-            except Exception as exc:
-                logger.warning("classify probe 探测失败，退回纯文本判定：%s", exc)
-        try:
-            verdict = await self.admitter.run(clean_query, [retrieval_context])
-            if verdict.verdict == "out_of_scope":
-                return PreprocessResult("out_of_scope", verdict.reason)
-            if verdict.verdict == "missing_info":
-                return PreprocessResult(
-                    "missing_info", verdict.reason, verdict.clarify_question
-                )
-        except Exception as exc:
-            # admit 抛错 → 降级 ok 放行 preprocessor；Admitter 内部已兜底 LLM 失败，
-            # 此处再兜一层防 admitter.run 契约级异常，绝不阻塞。
-            logger.warning("classify admit 抛错，降级 ok 放行：%s", exc)
-        return await self.preprocessor.run(clean_query, retrieval_context)
 
     async def _decide_subq(
         self, q: str, book_titles: Optional[list[str]], probe: bool = True

@@ -1,7 +1,7 @@
-"""章节摘要法【完整闭环】PoC：整章锚定生成广题 → 喂真实 classify → 看是否触发 split。
+"""章节摘要法【完整闭环】PoC：整章锚定生成广题 → 喂真实 _decide_subq → 看是否触发 split。
 
 相比 poc_chapter_summary（只生成）+ poc_classify_check（只分类），这里串成一条：
-  整章聚合 → DeepSeek 生成广题 → QaCapability.classify() → 打印 category。
+  整章聚合 → DeepSeek 生成广题 → QaCapability._decide_subq() → 打印 category。
 
 锚定"横切主题"的整章（如第6章 索引），其内容在全库分散，召回天然离散 → 期望 pending_split。
 
@@ -93,12 +93,13 @@ async def main():
         nodes = await qa._retrieve_nodes(q, None)
         chaps = {chapter_number(getattr(n, "metadata", {}).get("chapter", "") or "")[:1]
                  for n in nodes if chapter_number(getattr(n, "metadata", {}).get("chapter", "") or "")}
-        result = await qa.classify(q, book_titles=None, probe=True)
-        flag = "✓触发split" if result.category == "pending_split" else "·"
+        dec = await qa._decide_subq(q, None, probe=True)
+        sut_category = dec.category if dec.verdict == "ok" else dec.verdict
+        flag = "✓触发split" if sut_category == "pending_split" else "·"
         print(f"[广题{i}] {q}")
-        print(f"   召回命中章: {sorted(c[0] for c in chaps)}  →  category={result.category} {flag}")
-        if result.reason:
-            print(f"   reason: {result.reason}")
+        print(f"   召回命中章: {sorted(c[0] for c in chaps)}  →  category={sut_category} {flag}")
+        if dec.reason:
+            print(f"   reason: {dec.reason}")
         print("-" * 72)
 
 

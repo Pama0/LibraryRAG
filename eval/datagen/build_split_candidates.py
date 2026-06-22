@@ -97,10 +97,11 @@ async def main():
         nodes = await qa._retrieve_nodes(q, None)
         hits, n_distinct, dom = dispersion(nodes)
         sug = suggest(intent)
-        result = await qa.classify(q, book_titles=None, probe=True)
+        dec = await qa._decide_subq(q, None, probe=True)
+        sut_category = dec.category if dec.verdict == "ok" else dec.verdict
         rows.append({
             "user_input": q, "scope": None,
-            "suggested_category": sug, "sut_category": result.category,
+            "suggested_category": sug, "sut_category": sut_category,
             "intent": intent, "n_distinct_chapters": n_distinct,
             "dominant_share": dom, "hit_chapters": hits, "source": src,
         })

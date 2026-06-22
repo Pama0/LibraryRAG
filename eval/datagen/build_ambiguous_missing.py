@@ -95,12 +95,13 @@ async def main():
         nodes = await qa._retrieve_nodes(q, None)
         n_hit, top = probe_summary(nodes)
         sug = INTENT_LABEL[intent]
-        result = await qa.classify(q, book_titles=None, probe=True)
+        dec = await qa._decide_subq(q, None, probe=True)
+        sut_category = dec.category if dec.verdict == "ok" else dec.verdict
         rows.append({
             "user_input": q, "scope": None,
-            "suggested_category": sug, "sut_category": result.category,
+            "suggested_category": sug, "sut_category": sut_category,
             "intent": intent, "probe_hits": n_hit, "top_chapter": top,
-            "reason": result.reason, "clarify": result.clarify_question, "source": src,
+            "reason": dec.reason, "clarify": dec.clarify_question, "source": src,
         })
 
     os.makedirs(DATASET_DIR, exist_ok=True)
