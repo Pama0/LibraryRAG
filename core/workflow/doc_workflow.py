@@ -103,8 +103,6 @@ class DocQueryWorkflow(Workflow):
         probe_retriever: str | None = None,
         probe_reranker: str | None = None,
         probe_then_classify: bool = True,
-        split_enabled: bool = True,
-        assume_enabled: bool = True,
         other_agent_enabled: bool = True,
         **kw,
     ):
@@ -119,6 +117,7 @@ class DocQueryWorkflow(Workflow):
             probe_retriever=make_retriever(probe_retriever),  # None → VectorRetriever
             probe_reranker=make_reranker(probe_reranker),     # None → None（不重排）
             explain_retriever=make_retriever("hybrid"),       # explain 宽覆盖召回默认 hybrid
+            agent_enabled=other_agent_enabled,
         )
         self.qa_agent = QaAgent(index_manager, llm, similarity_top_k, max_iterations=6)
         # 注入有界 agent：simple 证据不足升级 / complex 自由多轮探索（见 qa._execute_subq）。
@@ -127,14 +126,12 @@ class DocQueryWorkflow(Workflow):
         self.scoper = ConversationScoper(
             index_manager, probe_retriever=make_retriever(probe_retriever)
         )
-        # 决策开关（评测 ablation 用）。probe_then_classify 仍生效（经 self._probe 传给
-        # qa.answer）；split_enabled/assume_enabled/other_agent_enabled 不再驱动分支
-        # （旧 category 分支已删，多子问题编排走 qa.answer 内部 _execute_subq 统一分派）。
-        # TODO(Plan 2 / eval 适配)：这三个开关现已失效，待 eval 调用方清理后随之移除。
+        # 决策开关（评测 ablation 用）：probe_then_classify 经 self._probe 传给 qa.answer；
+        # other_agent_enabled 经 qa.agent_enabled 真正门控 _execute_subq 的有界 agent 调用点
+        # （complex / simple 升级 / explain EmptySkeleton 兜底，见 qa_capability.py）。
+        # 旧的拆分开关/比较开关在新 qa.answer 编排里无对应分支（拆分结构性、
+        # always-on；compare 总走 assume），无意义映射，已删除。
         self._probe = probe_then_classify
-        self._split_enabled = split_enabled
-        self._assume_enabled = assume_enabled
-        self._other_agent_enabled = other_agent_enabled
 
     # ── 入口：把 memory + 原始 query + scope 全塞进 ctx，贯穿全程 ──
     @step

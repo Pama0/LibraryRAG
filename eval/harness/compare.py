@@ -1,7 +1,10 @@
 """决策对比 runner：对变体列表跑同一测试集，渲染 baseline vs 变体的 delta 表。
 
-变体 = 一组决策 flag（probe/split/assume/other 的 on-off）。baseline 通常全单轮，
-逐个打开决策，对比表每行一个变体、delta 列即"该决策带来多少提升"。
+变体 = 一组决策 flag。两个布尔轴：probe_then_classify（probe 探测召回再判类 on-off）+
+other_agent_enabled（有界 agent on-off，门控 qa.answer 内 complex/simple 升级/explain
+EmptySkeleton 兜底）。旧的 split/assume 开关在新 qa.answer 编排里无对应分支已删除。
+baseline 通常全单轮、无 agent，逐个打开决策，对比表每行一个变体、delta 列即
+"该决策带来多少提升"。
 """
 # agent vs 全开（delta 相对全开）python -m eval.harness.compare --testset eval/dataset/golden.jsonl --variants "全开" "agent(自主规划)"
 import argparse
@@ -17,33 +20,21 @@ from eval.harness.report import (
 )
 
 
-# 变体矩阵：baseline 全单轮，逐个打开决策
+# 变体矩阵：baseline 全单轮无 agent，逐个打开决策
 VARIANTS = {
-    "baseline": dict(probe_then_classify=False, split_enabled=False,
-                             assume_enabled=False, other_agent_enabled=False), #全单轮
-    "+probe": dict(probe_then_classify=True, split_enabled=False,
-                   assume_enabled=False, other_agent_enabled=False),
-    "+probe+split": dict(probe_then_classify=True, split_enabled=True,
-                         assume_enabled=False, other_agent_enabled=False),
-    "全开": dict(probe_then_classify=True, split_enabled=True,
-                 assume_enabled=True, other_agent_enabled=True),
-    # 单变量隔离 probe 检索：相对「全开」只把 probe 切到 hybrid（答案仍 vector），
-    # 看分类准确率列的 delta = probe 用 hybrid vs 默认 vector 值多少。
-    "全开+probe-hybrid": dict(probe_then_classify=True, split_enabled=True,
-                              assume_enabled=True, other_agent_enabled=True,
+    "baseline": dict(probe_then_classify=False, other_agent_enabled=False),  # 全单轮、无 agent
+    "+probe": dict(probe_then_classify=True, other_agent_enabled=False),
+    "全开": dict(probe_then_classify=True, other_agent_enabled=True),  # = probe + agent
+    "全开+probe-hybrid": dict(probe_then_classify=True, other_agent_enabled=True,
                               probe_retriever="hybrid"),
-    "全开+rerank": dict(probe_then_classify=True, split_enabled=True,
-                        assume_enabled=True, other_agent_enabled=True,
+    "全开+rerank": dict(probe_then_classify=True, other_agent_enabled=True,
                         reranker="bge-reranker-v2-m3"),
-    "全开+hybrid": dict(probe_then_classify=True, split_enabled=True,
-                        assume_enabled=True, other_agent_enabled=True,
+    "全开+hybrid": dict(probe_then_classify=True, other_agent_enabled=True,
                         retriever="hybrid"),
-    "全开+hybrid+rerank": dict(probe_then_classify=True, split_enabled=True,
-                               assume_enabled=True, other_agent_enabled=True,
+    "全开+hybrid+rerank": dict(probe_then_classify=True, other_agent_enabled=True,
                                retriever="hybrid", reranker="bge-reranker-v2-m3"),
-    "all": dict(probe_then_classify=True, split_enabled=True,
-                               assume_enabled=True, other_agent_enabled=True,
-                               retriever="hybrid", reranker="bge-reranker-v2-m3",probe_retriever="hybrid"),#全开+hybrid+rerank+probe-hybrid
+    "all": dict(probe_then_classify=True, other_agent_enabled=True,
+                retriever="hybrid", reranker="bge-reranker-v2-m3", probe_retriever="hybrid"),
 }
 
 # agent 自主规划路线：另一个 SUT 类（非 flags 组合）。值置 None 作哨兵，

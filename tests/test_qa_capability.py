@@ -1183,6 +1183,57 @@ async def test_answer_multi_subject_explain_out_of_scope_does_not_abort_turn():
     assert REFUSAL_TEXT in ans
 
 
+async def test_execute_complex_agent_disabled_uses_single_retrieve_without_calling_agent():
+    # agent_enabled=False ⇒ complex 不得调用 agent，即便 qa_agent 不是 None
+    qa = _qa()
+    qa.agent_enabled = False
+    qa.qa_agent = _FakeAgent(answer="AGENT答案")
+    async def fake_retrieve(ctx, q, bt, preamble="", nodes=None):
+        return "降级单轮", ["n"]
+    qa.retrieve = fake_retrieve
+    ans, nodes = await qa._execute_subq(FakeCtx(), "怎么优化MySQL", "complex", None)
+    assert ans == "降级单轮"
+    assert qa.qa_agent.called_with is None    # agent 从未被调用
+
+
+async def test_execute_simple_agent_disabled_does_not_escalate_even_if_weak():
+    # agent_enabled=False + 证据弱（空召回）⇒ 仍不得升级 agent，直接复用节点单轮合成
+    qa = _qa()
+    qa.agent_enabled = False
+    async def empty_nodes(q, bt):
+        return []   # 空召回 = 证据不足，正常情况下会触发升级
+    qa._retrieve_nodes = empty_nodes
+    qa.qa_agent = _FakeAgent(answer="AGENT答案")
+    async def fake_retrieve(ctx, q, bt, preamble="", nodes=None):
+        return "单轮答案", (nodes if nodes is not None else [])
+    qa.retrieve = fake_retrieve
+    ans, nodes = await qa._execute_subq(FakeCtx(), "冷门问题", "simple", None)
+    assert ans == "单轮答案"
+    assert qa.qa_agent.called_with is None    # agent 从未被调用
+
+
+async def test_execute_explain_empty_skeleton_agent_disabled_falls_back_to_retrieve():
+    # agent_enabled=False + EmptySkeleton ⇒ 不得调用 agent 兜底，直接落 retrieve
+    qa = _qa()
+    qa.agent_enabled = False
+    async def boom_explain(ctx, q, bt):
+        raise EmptySkeleton(q)
+    qa.explain = boom_explain
+    qa.qa_agent = _FakeAgent(answer="AGENT答案", nodes=["a"])
+    async def fake_retrieve(ctx, q, bt, preamble="", nodes=None):
+        return "降级单轮", ["r"]
+    qa.retrieve = fake_retrieve
+    ans, nodes = await qa._execute_subq(FakeCtx(), "讲讲X", "explain", None)
+    assert ans == "降级单轮"
+    assert nodes == ["r"]
+    assert qa.qa_agent.called_with is None    # agent 从未被调用
+
+
+def test_agent_enabled_defaults_to_true():
+    qa = _qa()
+    assert qa.agent_enabled is True
+
+
 async def test_execute_simple_escalation_exception_falls_back_to_retrieve():
     # agent 升级抛错 → except → 回落单轮（复用已取 nodes）
     qa = _qa()

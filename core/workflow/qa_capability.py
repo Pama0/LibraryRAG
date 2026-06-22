@@ -138,6 +138,7 @@ class QaCapability:
         explain_retriever: "Retriever | None" = None,
         explain_recall_k: int = 12,
         simple_escalate_min_score: float = 0.0,
+        agent_enabled: bool = True,
     ):
         self.index_manager = index_manager
         self.llm = llm
@@ -157,6 +158,9 @@ class QaCapability:
         self.explain_retriever = explain_retriever or VectorRetriever()
         self.explain_recall_k = explain_recall_k
         self.simple_escalate_min_score = simple_escalate_min_score
+        # ablation 开关：False ⇒ 有界 agent 在任何 _execute_subq 调用点都不会被使用
+        # （complex 单轮降级 / simple 不升级 / explain EmptySkeleton 不兜底）。
+        self.agent_enabled = agent_enabled
         self.admitter = Admitter(llm)
         self.outliner = AnswerOutliner(llm)
         self._retrieve_concurrency = 4  # 扇出检索并发上限，防 embedding/BM25/rerank 打爆
@@ -212,7 +216,7 @@ class QaCapability:
                 logger.info("explain 子问题信息不足，降级反问：%r", q[:60])
                 return e.clarify_question or REFUSAL_FALLBACK, []
             except EmptySkeleton:
-                if self.qa_agent is not None:
+                if self.qa_agent is not None and self.agent_enabled:
                     try:
                         return await self.qa_agent.run(ctx, q, book_titles)
                     except Exception as exc:
@@ -221,7 +225,7 @@ class QaCapability:
         if category == "compare":
             return await self.assume(ctx, q, book_titles)
         if category == "complex":
-            if self.qa_agent is None:
+            if self.qa_agent is None or not self.agent_enabled:
                 return await self.retrieve(ctx, q, book_titles)
             try:
                 return await self.qa_agent.run(ctx, q, book_titles)
@@ -230,7 +234,7 @@ class QaCapability:
                 return await self.retrieve(ctx, q, book_titles)
         # simple（含分类降级）：先检索一次，证据不足且有 agent → 升级；否则复用节点合成
         nodes = await self._retrieve_nodes(q, book_titles)
-        if self._evidence_weak(nodes) and self.qa_agent is not None:
+        if self._evidence_weak(nodes) and self.qa_agent is not None and self.agent_enabled:
             logger.info("simple 证据不足，升级 agent：%r", q[:60])
             try:
                 return await self.qa_agent.run(ctx, q, book_titles)

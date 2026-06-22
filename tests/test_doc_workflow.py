@@ -492,3 +492,14 @@ def test_probe_reranker_name_resolved_and_injected(monkeypatch):
 def test_qa_agent_injected_into_qa_capability():
     wf = DocQueryWorkflow(_StubIndexManager(), _StubLLM())
     assert wf.qa.qa_agent is wf.qa_agent
+
+
+# ── other_agent_enabled 透传为 qa.agent_enabled（ablation 轴重接）────────
+def test_other_agent_enabled_defaults_to_true_and_propagates():
+    wf = DocQueryWorkflow(_StubIndexManager(), _StubLLM())
+    assert wf.qa.agent_enabled is True
+
+
+def test_other_agent_enabled_false_propagates_to_qa_agent_enabled():
+    wf = DocQueryWorkflow(_StubIndexManager(), _StubLLM(), other_agent_enabled=False)
+    assert wf.qa.agent_enabled is False
