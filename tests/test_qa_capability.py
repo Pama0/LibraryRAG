@@ -1071,6 +1071,118 @@ async def test_execute_simple_retrieves_exactly_once_through_real_retrieve():
     assert qa.qa_agent.called_with is None
 
 
+async def test_execute_explain_out_of_scope_does_not_propagate():
+    # 回归：explain 路 OutOfScope 必须被 _execute_subq 接住，不能让整轮中断
+    qa = _qa()
+    async def boom_explain(ctx, q, bt):
+        raise OutOfScope(q)
+    qa.explain = boom_explain
+    ans, nodes = await qa._execute_subq(FakeCtx(), "PG的MVCC", "explain", None)
+    assert ans == REFUSAL_TEXT
+    assert nodes == []
+
+
+async def test_execute_explain_missing_info_returns_clarify():
+    qa = _qa()
+    async def boom_explain(ctx, q, bt):
+        raise MissingInfo("具体点？")
+    qa.explain = boom_explain
+    ans, nodes = await qa._execute_subq(FakeCtx(), "这个索引", "explain", None)
+    assert ans == "具体点？"
+    assert nodes == []
+
+
+async def test_execute_explain_missing_info_no_clarify_uses_fallback():
+    qa = _qa()
+    async def boom_explain(ctx, q, bt):
+        raise MissingInfo()
+    qa.explain = boom_explain
+    ans, nodes = await qa._execute_subq(FakeCtx(), "这个索引", "explain", None)
+    assert ans == REFUSAL_FALLBACK
+    assert nodes == []
+
+
+async def test_execute_explain_empty_skeleton_falls_back_to_agent():
+    qa = _qa()
+    async def boom_explain(ctx, q, bt):
+        raise EmptySkeleton(q)
+    qa.explain = boom_explain
+    qa.qa_agent = _FakeAgent(answer="AGENT答案", nodes=["a"])
+    ans, nodes = await qa._execute_subq(FakeCtx(), "讲讲X", "explain", None)
+    assert ans == "AGENT答案"
+    assert nodes == ["a"]
+    assert qa.qa_agent.called_with == "讲讲X"
+
+
+async def test_execute_explain_empty_skeleton_agent_none_falls_back_to_retrieve():
+    qa = _qa()
+    async def boom_explain(ctx, q, bt):
+        raise EmptySkeleton(q)
+    qa.explain = boom_explain
+    qa.qa_agent = None
+    async def fake_retrieve(ctx, q, bt, preamble="", nodes=None):
+        return "降级单轮", ["r"]
+    qa.retrieve = fake_retrieve
+    ans, nodes = await qa._execute_subq(FakeCtx(), "讲讲X", "explain", None)
+    assert ans == "降级单轮"
+    assert nodes == ["r"]
+
+
+async def test_execute_explain_empty_skeleton_agent_exception_falls_back_to_retrieve():
+    qa = _qa()
+    async def boom_explain(ctx, q, bt):
+        raise EmptySkeleton(q)
+    qa.explain = boom_explain
+    class _BoomAgent:
+        async def run(self, ctx, q, bt):
+            raise RuntimeError("agent boom")
+    qa.qa_agent = _BoomAgent()
+    async def fake_retrieve(ctx, q, bt, preamble="", nodes=None):
+        return "降级单轮", ["r"]
+    qa.retrieve = fake_retrieve
+    ans, nodes = await qa._execute_subq(FakeCtx(), "讲讲X", "explain", None)
+    assert ans == "降级单轮"
+
+
+async def test_answer_multi_subject_explain_out_of_scope_does_not_abort_turn():
+    # 回归（Critical）：多子问题中一个 explain 抛 OutOfScope，整轮不能被中断，
+    # 兄弟子问题答案必须出现在最终返回文本里。
+    from core.workflow.qa_capability import _SubDecision
+    qa = _qa()
+
+    async def fake_split(cq):
+        return ["讲讲PG的MVCC", "MySQL有哪些锁"]
+    qa.split_query = fake_split
+
+    ds = {
+        "讲讲PG的MVCC": _SubDecision("讲讲PG的MVCC", "ok", category="explain"),
+        "MySQL有哪些锁": _SubDecision("MySQL有哪些锁", "ok", category="simple"),
+    }
+    async def fake_decide(q, bt, probe=True):
+        return ds[q]
+    qa._decide_subq = fake_decide
+
+    async def boom_explain(ctx, q, bt):
+        raise OutOfScope(q)
+    qa.explain = boom_explain
+
+    async def fake_retrieve_nodes(q, bt):
+        return ["n1"]
+    qa._retrieve_nodes = fake_retrieve_nodes
+
+    async def fake_retrieve(ctx, q, bt, preamble="", nodes=None):
+        return "锁有X", (nodes if nodes is not None else ["n1"])
+    qa.retrieve = fake_retrieve
+
+    ctx = FakeCtx()
+    ans, nodes, meta = await qa.answer(ctx, "讲讲PG的MVCC和MySQL有哪些锁", None)
+
+    # 整轮未被中断：simple 兄弟答案在文本里
+    assert "锁有X" in ans
+    # explain 子问题降级为拒答文案
+    assert REFUSAL_TEXT in ans
+
+
 async def test_execute_simple_escalation_exception_falls_back_to_retrieve():
     # agent 升级抛错 → except → 回落单轮（复用已取 nodes）
     qa = _qa()
