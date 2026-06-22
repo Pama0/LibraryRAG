@@ -73,57 +73,8 @@ class DirectReplyEvent(Event):
     action: str = ""
 
 
-class OutOfScopeEvent(Event):
-    """out_of_scope → 库外问题（探测召回片段与主题无关）。如实告知，不检索/不反问。"""
-
-
-class PreprocessEvent(Event):
-    """intent=qa → QA 内部预处理（降噪 + 难度分类）。纯信号；clean_query 从 ctx 取。"""
-
-
-class ExplainEvent(Event):
-    """intent=explain → 讲清楚精修工作流（宽召回→列骨架→每节点检索→教学体合成）。"""
-
-
-class RetrieveAgentEvent(Event):
-    """retrievable / other / 降级 → 直接检索 + 合成。
-
-    assumption_note 非空（missing_info 预算耗尽降级）→ 答案前声明所作假设。
-    """
-
-    rewritten_query: str
-    assumption_note: str = ""
-
-
-class SplitEvent(Event):
-    """pending_split → 拆解-检索-汇总。"""
-
-    rewritten_query: str
-    split_reason: str = ""
-
-
-class AssumeEvent(Event):
-    """ambiguous → 归纳评判维度 + 声明所选角度后逐维度回答。"""
-
-    rewritten_query: str
-
-
-class ClarifyEvent(Event):
-    """missing_info → 反问用户，本轮终止等补充。"""
-
-    rewritten_query: str
-    clarify_reason: str = ""
-    clarify_question: str = ""
-
-
-class OtherEvent(Event):
-    """other → 高难度/开放问题分支。
-
-    第二步将换为「有界 agent（自由调用工具 + 成本/次数边界 + 超界降级）」；
-    v1 先从 fallback 独立出来、暂走单轮检索。
-    """
-
-    rewritten_query: str
+class SplitAnswerEvent(Event):
+    """dispatch_qa → 多子问题拆分 + 编排作答。纯信号；clean_query 从 ctx 取。"""
 
 
 class FinalizeEvent(Event):
@@ -134,7 +85,7 @@ class FinalizeEvent(Event):
 
 
 class DocQueryWorkflow(Workflow):
-    """文档库顶层 query 编排：route(门口) → preprocess(QA 降噪+难度) → 分支检索合成 → finalize。"""
+    """文档库顶层 query 编排：route(门口) → split_answer(QA 拆分+编排作答) → finalize。"""
 
     def __init__(
         self,
@@ -170,11 +121,16 @@ class DocQueryWorkflow(Workflow):
             explain_retriever=make_retriever("hybrid"),       # explain 宽覆盖召回默认 hybrid
         )
         self.qa_agent = QaAgent(index_manager, llm, similarity_top_k, max_iterations=6)
+        # 注入有界 agent：simple 证据不足升级 / complex 自由多轮探索（见 qa._execute_subq）。
+        self.qa.qa_agent = self.qa_agent
         # 全库多轮作用域收窄：probe 复用 workflow 的 probe_retriever 名字（None→vector）
         self.scoper = ConversationScoper(
             index_manager, probe_retriever=make_retriever(probe_retriever)
         )
-        # 决策开关（评测 ablation 用；off → 对应分支降级单轮 retrieve、probe 关闭）
+        # 决策开关（评测 ablation 用）。probe_then_classify 仍生效（经 self._probe 传给
+        # qa.answer）；split_enabled/assume_enabled/other_agent_enabled 不再驱动分支
+        # （旧 category 分支已删，多子问题编排走 qa.answer 内部 _execute_subq 统一分派）。
+        # TODO(Plan 2 / eval 适配)：这三个开关现已失效，待 eval 调用方清理后随之移除。
         self._probe = probe_then_classify
         self._split_enabled = split_enabled
         self._assume_enabled = assume_enabled
@@ -194,7 +150,7 @@ class DocQueryWorkflow(Workflow):
     @step
     async def route(
         self, ctx: Context, ev: RouteEvent
-    ) -> "PreprocessEvent | StudyPlanEvent | DirectReplyEvent":
+    ) -> "SplitAnswerEvent | StudyPlanEvent | DirectReplyEvent":
         original = await ctx.store.get("original_query")
         memory: Optional[ChatMemoryBuffer] = await ctx.store.get("memory")
         book_titles = await ctx.store.get("book_titles")
@@ -217,54 +173,7 @@ class DocQueryWorkflow(Workflow):
             await ctx.store.set("scope_note", scope.note)
         else:
             await ctx.store.set("scope_note", "")
-        return PreprocessEvent()
-
-    # ── QA 内部预处理：委托 QA capability 做降噪 + 难度分类，据 category dispatch。 ──
-    @step
-    async def preprocess(
-        self, ctx: Context, ev: PreprocessEvent
-    ) -> "RetrieveAgentEvent | SplitEvent | AssumeEvent | ClarifyEvent | OtherEvent | OutOfScopeEvent | ExplainEvent":
-        clean_query = await ctx.store.get("clean_query")
-        book_titles = await ctx.store.get("book_titles")
-
-        # Call A：检索降噪 + 意图二判。降噪后的检索 query 来源唯一在此（存 ctx 供下游分支）。
-        denoised_query, intent = await self.qa.gate(clean_query)
-        await ctx.store.set("rewritten_query", denoised_query)
-        await ctx.store.set("intent", intent)
-        if intent == "explain":
-            return ExplainEvent()
-
-        # Call B：难度六分类（非 explain）。rewritten_query 已由 gate 提供，不取 classify 的。
-        result = await self.qa.classify(denoised_query, book_titles, probe=self._probe)
-        await ctx.store.set("category", result.category)
-
-        rewritten = denoised_query
-        match result.category:
-            case "out_of_scope":
-                return OutOfScopeEvent()
-            case "pending_split":
-                return SplitEvent(rewritten_query=rewritten, split_reason=result.reason)
-            case "ambiguous":
-                return AssumeEvent(rewritten_query=rewritten)
-            case "missing_info":
-                if await ctx.store.get("allow_clarify"):
-                    return ClarifyEvent(
-                        rewritten_query=rewritten,
-                        clarify_reason=result.reason,
-                        clarify_question=result.clarify_question,
-                    )
-                # 预算耗尽降级：不反问，声明假设、尽力答
-                note = (
-                    f"（注：原问题信息不足（{result.reason}），"
-                    f"以下按最可能的解读作答。）\n"
-                )
-                return RetrieveAgentEvent(
-                    rewritten_query=rewritten, assumption_note=note
-                )
-            case "other":
-                return OtherEvent(rewritten_query=rewritten)
-            case _:  # retrievable / 解析失败 fallback
-                return RetrieveAgentEvent(rewritten_query=rewritten)
+        return SplitAnswerEvent()
 
     async def _scope_prefix(self, ctx: Context) -> str:
         """全库收窄的透明声明：流式先推一个 delta，并返回前缀供拼进最终答案。空则无副作用。"""
@@ -289,101 +198,16 @@ class DocQueryWorkflow(Workflow):
         return FinalizeEvent(answer=ev.reply, source_nodes=[])
 
     @step
-    async def out_of_scope_branch(self, ctx: Context, ev: OutOfScopeEvent) -> FinalizeEvent:
-        # 库外：探测召回片段与问题主题无关 → 共享拒答话术（与 explain OutOfScope catch 同源）。
-        return FinalizeEvent(answer=REFUSAL_TEXT, source_nodes=[])
-
-    @step
-    async def explain_branch(self, ctx: Context, ev: ExplainEvent) -> FinalizeEvent:
-        # explain：讲清楚精修工作流。
-        # - admit 判库外 → OutOfScope → 拒答 finalize + 写 category（供评测算分类准确率）
-        # - admit 判信息不足 → MissingInfo → 反问 finalize + 写 category
-        # - 空骨架 → 落有界 agent 多轮探索 → agent 再失败 → 单轮兜底
-        rewritten = await ctx.store.get("rewritten_query")
-        book_titles = await ctx.store.get("book_titles")
-        try:
-            answer, nodes = await self.qa.explain(ctx, rewritten, book_titles)
-        except OutOfScope:
-            logger.info("explain: admit 判库外，拒答")
-            await ctx.store.set("category", "out_of_scope")
-            return FinalizeEvent(answer=REFUSAL_TEXT, source_nodes=[])
-        except MissingInfo as e:
-            logger.info("explain: admit 判信息不足，反问")
-            await ctx.store.set("category", "missing_info")
-            return FinalizeEvent(
-                answer=e.clarify_question or REFUSAL_FALLBACK, source_nodes=[]
-            )
-        except EmptySkeleton:
-            logger.info("explain: 空骨架，落 agent 兜底")
-            try:
-                answer, nodes = await self.qa_agent.run(ctx, rewritten, book_titles)
-            except Exception as exc:
-                logger.warning("explain agent 兜底失败，降级单轮：%s", exc)
-                answer, nodes = await self.qa.retrieve(ctx, rewritten, book_titles)
-            prefix = await self._scope_prefix(ctx)
-            return FinalizeEvent(answer=prefix + answer, source_nodes=nodes)
-        prefix = await self._scope_prefix(ctx)
-        return FinalizeEvent(answer=prefix + answer, source_nodes=nodes)
-
-    @step
-    async def retrieve_branch(self, ctx: Context, ev: RetrieveAgentEvent) -> FinalizeEvent:
+    async def split_answer(self, ctx: Context, ev: SplitAnswerEvent) -> FinalizeEvent:
+        # dispatch_qa → 委托 QA capability 统一编排：拆分子问题 + 判定 + 按序执行 + 合并装饰。
+        clean_query = await ctx.store.get("clean_query")
         book_titles = await ctx.store.get("book_titles")
         prefix = await self._scope_prefix(ctx)
-        answer, nodes = await self.qa.retrieve(
-            ctx, ev.rewritten_query, book_titles, ev.assumption_note
+        answer, nodes, meta = await self.qa.answer(
+            ctx, clean_query, book_titles, probe=self._probe
         )
+        await ctx.store.set("qa_meta", meta)
         return FinalizeEvent(answer=prefix + answer, source_nodes=nodes)
-
-    @step
-    async def other_branch(self, ctx: Context, ev: OtherEvent) -> FinalizeEvent:
-        """高难度/开放问题 → 有界 agent 自由多轮检索探索。
-
-        agent 异常 → 降级单轮检索，绝不让 other 比单轮更脆。
-        """
-        book_titles = await ctx.store.get("book_titles")
-        prefix = await self._scope_prefix(ctx)
-        if not self._other_agent_enabled:
-            answer, nodes = await self.qa.retrieve(ctx, ev.rewritten_query, book_titles)
-            return FinalizeEvent(answer=prefix + answer, source_nodes=nodes)
-        try:
-            answer, nodes = await self.qa_agent.run(
-                ctx, ev.rewritten_query, book_titles
-            )
-        except Exception as exc:
-            logger.warning("other agent 失败，降级单轮检索：%s", exc)
-            answer, nodes = await self.qa.retrieve(
-                ctx, ev.rewritten_query, book_titles
-            )
-        return FinalizeEvent(answer=prefix + answer, source_nodes=nodes)
-
-    @step
-    async def split_branch(self, ctx: Context, ev: SplitEvent) -> FinalizeEvent:
-        book_titles = await ctx.store.get("book_titles")
-        prefix = await self._scope_prefix(ctx)
-        if self._split_enabled:
-            answer, nodes = await self.qa.split(ctx, ev.rewritten_query, book_titles)
-        else:
-            answer, nodes = await self.qa.retrieve(ctx, ev.rewritten_query, book_titles)
-        return FinalizeEvent(answer=prefix + answer, source_nodes=nodes)
-
-    @step
-    async def assume_branch(self, ctx: Context, ev: AssumeEvent) -> FinalizeEvent:
-        book_titles = await ctx.store.get("book_titles")
-        prefix = await self._scope_prefix(ctx)
-        if self._assume_enabled:
-            answer, nodes = await self.qa.assume(ctx, ev.rewritten_query, book_titles)
-        else:
-            answer, nodes = await self.qa.retrieve(ctx, ev.rewritten_query, book_titles)
-        return FinalizeEvent(answer=prefix + answer, source_nodes=nodes)
-
-    # ── 反问：本轮终止，把反问句作为答案，由 finalize 写回记忆等用户补充 ──
-    @step
-    async def clarify_branch(self, ctx: Context, ev: ClarifyEvent) -> FinalizeEvent:
-        # 优先用 LLM 产出的自然反问句；缺失则退回模板拼 reason（绝不阻塞）
-        question = ev.clarify_question or f"为了更准确地回答，请补充：{ev.clarify_reason}"
-        # 反问句经 finalize 作为 assistant turn 进会话记忆，
-        # 下一轮门口才能同时看到「原问题 + 反问 + 用户补充」一起消解。
-        return FinalizeEvent(answer=question, source_nodes=[])
 
     # ── 收尾：唯一写「会话记忆」的地方 = 原始问题 + 最终答案 ──────────
     @step
@@ -398,12 +222,10 @@ class DocQueryWorkflow(Workflow):
             "finalize: answer_len=%d source_nodes=%d",
             len(ev.answer or ""), len(ev.source_nodes or []),
         )
-        # 把 category/intent 附到结果 metadata，供评测算分类准确率/分支分布（api 不受影响）
-        meta = {
-            "category": await ctx.store.get("category", None),
-            "action": await ctx.store.get("action", None),
-            "intent": await ctx.store.get("intent", None),  # explain/other：供 eval 区分 explain 路径
-        }
+        # meta 以 qa.answer 产出的 qa_meta（category/categories/sub_count）为主，叠加 action；
+        # 非 qa 路径（study_plan/converse/clarify）qa_meta 为空，meta 退化为仅 {"action": ...}。
+        qa_meta = await ctx.store.get("qa_meta", {}) or {}
+        meta = {**qa_meta, "action": await ctx.store.get("action", None)}
         return StopEvent(
             result=Response(
                 response=ev.answer, source_nodes=ev.source_nodes, metadata=meta
