@@ -272,6 +272,8 @@ class QaCapability:
             *(self._decide_subq(s.query, book_titles, probe=probe, disable_scope=disable_scope)
               for s in qa_subs)
         )
+        # 按 query 文本索引判定结果：依赖 splitter 产出的子问题文本互不相同（铁律已约束）。
+        # 若极端情况下拆出两个同文本 dispatch_qa 子问题，后者覆盖前者、且输出循环会各执行一次。
         by_query = {d.query: d for d in decided}
         oks = [d for d in decided if d.verdict == "ok"]
         missing = [d for d in decided if d.verdict == "missing_info"]
