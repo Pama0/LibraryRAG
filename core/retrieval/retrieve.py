@@ -41,13 +41,19 @@ def build_book_filters(book_titles):
 
 
 def bm25_tokenize(text: str) -> list[str]:
-    """中文 BM25 分词：jieba 切词 + 小写 + 丢空白/纯标点 token（否则噪声毁排序）。"""
+    """中文 BM25 分词：jieba 切词 + 小写 + 丢空白/纯标点 + 停用词（否则噪声毁排序）。
+
+    停用词过滤对 query 与语料同表同序生效，把检索收紧到内容词；只滤真功能词，
+    不碰「方法/机制」等中频实义词（IDF 已折损，删了反而误伤召回，见 stopwords.py）。
+    """
     import jieba
+
+    from core.retrieval.stopwords import STOPWORDS
 
     out: list[str] = []
     for t in jieba.lcut(text.lower()):
         t = t.strip()
-        if not t or re.fullmatch(r"[\W_]+", t):
+        if not t or re.fullmatch(r"[\W_]+", t) or t in STOPWORDS:
             continue
         out.append(t)
     return out

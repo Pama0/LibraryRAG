@@ -39,6 +39,22 @@ def test_bm25_tokenize_drops_whitespace_and_punct_and_lowercases():
     assert all(t.strip() and not __import__("re").fullmatch(r"[\W_]+", t) for t in toks)
 
 
+def test_bm25_tokenize_drops_stopwords():
+    # 功能词/疑问词（的/是/什么）被滤，内容词（mysql/索引）保留
+    toks = bm25_tokenize("什么是MySQL的索引")
+    for sw in ("什么", "是", "的"):
+        assert sw not in toks
+    assert "mysql" in toks
+    assert "索引" in toks
+
+
+def test_bm25_tokenize_keeps_midfreq_content_words():
+    # 「机制」是中频实义词，绝不能当停用词滤掉（只滤真功能词）
+    toks = bm25_tokenize("垃圾回收的机制")
+    assert "机制" in toks
+    assert "的" not in toks
+
+
 # ── rrf_fuse：按 node id 融合两列表，去重排序截断 ──────────────────────
 def _nws(nid, text="x"):
     return NodeWithScore(node=TextNode(text=text, id_=nid), score=1.0)
