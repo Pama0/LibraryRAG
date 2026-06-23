@@ -111,32 +111,18 @@ def aggregate(rows: list[dict]) -> dict:
     }
 
 
-# 变体矩阵：baseline 全单轮无 agent，逐个打开决策
+# 两条 SUT 路线：workflow（默认 flags = DocQueryService 生产配置）vs agent（自主规划）。
+# workflow 用空 flags dict（= 默认）；agent 用 None 作哨兵，build_sut 据此分流到 AgentSystem。
+WORKFLOW_VARIANT = "workflow"
+AGENT_VARIANT = "agent"
 VARIANTS = {
-    "baseline": dict(probe_then_classify=False, other_agent_enabled=False),  # 全单轮、无 agent
-    "+probe": dict(probe_then_classify=True, other_agent_enabled=False),
-    "全开": dict(probe_then_classify=True, other_agent_enabled=True),  # = probe + agent
-    "全开+probe-hybrid": dict(probe_then_classify=True, other_agent_enabled=True,
-                              probe_retriever="hybrid"),
-    "全开+rerank": dict(probe_then_classify=True, other_agent_enabled=True,
-                        reranker="bge-reranker-v2-m3"),
-    "全开+hybrid": dict(probe_then_classify=True, other_agent_enabled=True,
-                        retriever="hybrid"),
-    "全开+hybrid+rerank": dict(probe_then_classify=True, other_agent_enabled=True,
-                               retriever="hybrid", reranker="bge-reranker-v2-m3"),
-    "all": dict(probe_then_classify=True, other_agent_enabled=True,
-                retriever="hybrid", reranker="bge-reranker-v2-m3", probe_retriever="hybrid"),
+    WORKFLOW_VARIANT: {},
+    AGENT_VARIANT: None,
 }
-
-# agent 自主规划路线：另一个 SUT 类（非 flags 组合）。值置 None 作哨兵，
-# 进 CLI 可选名集合（choices）但不进默认 --variants 全集（多轮真实 agent，烧 LLM，需显式选）；
-# build_sut 里按 None 分流到 AgentSystem。
-AGENT_VARIANT = "agent(自主规划)"
-VARIANTS[AGENT_VARIANT] = None
 
 
 def build_sut(name: str, index_manager, llm):
-    """按变体名构造被测系统：哨兵(None) → AgentSystem，否则 DocQueryWorkflowSystem(flags)。"""
+    """按路线名构造被测系统：哨兵(None) → AgentSystem，否则 DocQueryWorkflowSystem(默认 flags)。"""
     from eval.harness.sut import AgentSystem, DocQueryWorkflowSystem
     if name not in VARIANTS:
         raise KeyError(name)
@@ -244,10 +230,11 @@ def main():
                    help="每个变体内并发跑多少条 query（默认 1=串行，保留逐行 token 计量；"
                         ">1 提速但 token 仅给变体级总量，遇限流(429)调小）")
     p.add_argument("--variants", nargs="+",
-                   default=[n for n in VARIANTS if n != AGENT_VARIANT],
+                   default=list(VARIANTS),
                    choices=list(VARIANTS.keys()),
-                   help=f"变体名子集，可选：{list(VARIANTS.keys())}；agent(自主规划) 需显式指定")
-    p.add_argument("--baseline", default="baseline(全单轮)", help="作为 delta 基准的变体名")
+                   help=f"路线子集，可选：{list(VARIANTS.keys())}（默认两条都跑）")
+    p.add_argument("--baseline", default=WORKFLOW_VARIANT,
+                   help="作为 delta 基准的路线名（默认 workflow，delta 列即 agent 相对 workflow）")
     p.add_argument("--out", default=None,
                    help="对比表 Markdown 落盘路径；缺省 eval/results/compare_<时间戳>.md")
     p.add_argument("--detail", default=None,
