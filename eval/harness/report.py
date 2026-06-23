@@ -1,23 +1,22 @@
-"""评测结果展示 + 落盘（compare 多变体 / run_eval 单系统共用）。
+"""评测结果展示 + 落盘（compare 用）。
 
 纯展示与持久化逻辑，不依赖 run_eval / compare，故两者都能 import 而不成环：
-- render_delta_table：分类准确率 + 5 ragas 列的 Markdown 表（单行时即单系统跑分，无 delta）。
-- write_detail_csv：每条明细 CSV（含 variant / match 列）。
-- default_result_paths：带时间戳的缺省落盘路径（prefix 区分 compare / run_eval）。
+- render_delta_table：5 ragas + 成本列的 Markdown 表（单行时无 delta）。
+- write_detail_csv：每条明细 CSV（含 expected_category 列供人工查阅）。
+- default_result_paths：带时间戳的缺省落盘路径（默认为 compare）。
 """
 import csv
 import os
 from datetime import datetime
 
-# 对比表展示的列（确定性指标——分类准确率——优先，最适合归因决策）
+# 对比表展示的列（5 ragas 质量 + 2 成本）
 _COLS = [
-    ("分类准确率", lambda rep: rep.get("classification", {}).get("accuracy")),
     ("context_precision", lambda rep: rep.get("metric_means", {}).get("context_precision")),
     ("context_recall", lambda rep: rep.get("metric_means", {}).get("context_recall")),
     ("factual_correctness", lambda rep: rep.get("metric_means", {}).get("factual_correctness")),
     ("faithfulness", lambda rep: rep.get("metric_means", {}).get("faithfulness")),
     ("answer_relevancy", lambda rep: rep.get("metric_means", {}).get("answer_relevancy")),
-    # 成本列：越低越好——delta 为正＝更贵（与上面质量列符号相反，读法见 EVAL_OVERVIEW）
+    # 成本列：越低越好——delta 为正＝更贵（与上面质量列符号相反）
     ("时延(s/条)", lambda rep: rep.get("cost", {}).get("mean_latency_s")),
     ("tokens/条", lambda rep: rep.get("cost", {}).get("mean_total_tokens")),
 ]
@@ -51,7 +50,7 @@ def render_delta_table(variants: list[dict], baseline: str) -> str:
 
 # 明细 CSV 列顺序
 _DETAIL_COLS = [
-    "variant", "user_input", "expected_category", "category", "match", "outcome",
+    "variant", "user_input", "expected_category", "outcome",
     "reference", "response", "num_contexts",
     "faithfulness", "answer_relevancy", "context_precision",
     "context_recall", "factual_correctness",
@@ -76,12 +75,10 @@ def default_result_paths(prefix: str = "compare", now: "datetime | None" = None)
 
 
 def write_detail_csv(detail: list[dict], path: str) -> None:
-    """每条明细写 CSV（utf-8-sig，Excel 直开）。match=金标准 vs SUT 实判是否一致。"""
+    """每条明细写 CSV（utf-8-sig，Excel 直开）。"""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=_DETAIL_COLS, extrasaction="ignore")
         w.writeheader()
         for d in detail:
-            row = dict(d)
-            row["match"] = int(d.get("category") == d.get("expected_category"))
-            w.writerow(row)
+            w.writerow(d)

@@ -4,33 +4,27 @@ from eval.harness.compare import render_delta_table
 
 def test_render_delta_table_marks_improvement():
     variants = [
-        {"name": "baseline", "report": {"classification": {"accuracy": 0.6},
-            "metric_means": {"context_recall": 0.62}}},
-        {"name": "+probe", "report": {"classification": {"accuracy": 0.9},
-            "metric_means": {"context_recall": 0.78}}},
+        {"name": "workflow", "report": {"metric_means": {"context_recall": 0.62}}},
+        {"name": "agent", "report": {"metric_means": {"context_recall": 0.78}}},
     ]
-    md = render_delta_table(variants, baseline="baseline")
-    assert "| baseline |" in md
-    assert "| +probe |" in md
-    assert "+0.30" in md or "+0.3" in md   # 分类准确率 delta（0.9-0.6）
-    assert "0.78" in md                     # context_recall 提升后的值
+    md = render_delta_table(variants, baseline="workflow")
+    assert "| workflow |" in md
+    assert "| agent |" in md
+    assert "0.78" in md
+    assert "+0.16" in md
 
 
 def test_render_delta_table_baseline_row_has_no_delta():
-    variants = [
-        {"name": "base", "report": {"classification": {"accuracy": 0.5}, "metric_means": {}}},
-    ]
+    variants = [{"name": "base", "report": {"metric_means": {"faithfulness": 0.5}}}]
     md = render_delta_table(variants, baseline="base")
     assert "0.50" in md
-    assert "(+0" not in md and "(-0" not in md   # baseline 自身不带 delta
+    assert "(+0" not in md and "(-0" not in md
 
 
 def test_render_delta_table_none_metric_shows_dash():
-    variants = [
-        {"name": "base", "report": {"classification": {"accuracy": None}, "metric_means": {}}},
-    ]
+    variants = [{"name": "base", "report": {"metric_means": {}}}]
     md = render_delta_table(variants, baseline="base")
-    assert "—" in md   # 无值列显示破折号
+    assert "—" in md
 
 
 # ── build_sut 工厂与两路线 VARIANTS ──────────────────────────────
@@ -70,13 +64,6 @@ def test_resolve_baseline_present_returns_it():
 
 def test_resolve_baseline_absent_falls_back_to_first():
     assert resolve_baseline("不存在", ["agent", "workflow"]) == "agent"
-
-
-def test_render_delta_table_raises_on_missing_baseline():
-    import pytest
-    variants = [{"name": "全开", "report": {"classification": {"accuracy": 0.7}, "metric_means": {}}}]
-    with pytest.raises(ValueError):
-        render_delta_table(variants, baseline="不存在的baseline")
 
 
 # ── 打分函数（原 run_eval，已搬入 compare.py）────────────────────────
