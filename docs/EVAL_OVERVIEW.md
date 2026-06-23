@@ -1,6 +1,6 @@
 # 评测体系总览（eval/）
 
-> 一句话：用 **ragas 指标 + 自定义分类准确率**，对"决策路由 RAG 系统"做 **baseline vs 变体（ablation）** 对比，量化每个决策（probe / split / assume / other）带来多少提升。
+> 一句话：用 **ragas 指标**，对"决策路由 RAG 系统"做 **workflow vs agent 两路线** 对比，量化每条路线带来多少提升。
 
 本文档梳理整套评测：被测什么、用什么指标、数据从哪来、脚本怎么分工、怎么跑、当前已知问题。
 
@@ -15,13 +15,12 @@
 └───────────────────────────┬───────────────────────────┘
                             │ 喂入
 ┌─ Runner ──────────────────▼───────────────────────────┐
-│  compare.py   多变体 ablation → baseline vs 变体 delta 表 │ ← 主力
-│  run_eval.py  单系统跑分 → 表 + md/detail CSV 落盘 results/ │
+│  compare.py   workflow vs agent 两路线对比 delta 表     │ ← 唯一入口
 └───────────────────────────┬───────────────────────────┘
               ┌─────────────┴─────────────┐
         被测系统 SUT                   评测打分
-   (sut.py 包装当前 workflow)     (metrics.py: 5 ragas 指标
-   逐条 query → 答案 + category      + run_eval.aggregate: 分类准确率)
+   (sut.py 包装 workflow + agent)    (metrics.py: 5 ragas 指标
+   逐条 query → 答案                    + compare.aggregate: 均值聚合)
               │                            │
    被测 LLM = DeepSeek            评测 judge LLM = DeepSeek
    (configs/llm.py)               (eval/config.py，刻意解耦)
@@ -77,9 +76,9 @@ category**，故分类准确率列显示「—」，只在 5 个 ragas 答案质
 **关键**：没有一个指标读测试集的 `reference_contexts`。它们要么用 SUT **实际召回**的 `retrieved_contexts`，要么用**参考答案** `reference`。全是 LLM 把文本拆成声明逐条判，**与召回 chunk 条数无关**。
 > 推论：标金标准**只需 `user_input` + `category`**；`reference` 仅 `context_recall`/`factual_correctness`/`context_precision` 用，可选；`reference_contexts` 不用填。
 
-### 3.2 分类准确率（`run_eval.aggregate`）—— 确定性，归因决策的核心
+### 3.2 分类准确率 —— 已移除
 
-把 SUT 实判的 `category` 与金标准 `expected_category` 逐条比，算准确率。**这是量化 probe/split 等决策提升的主指标**（不依赖评测 LLM 的语义判断，最干净）。
+分类准确率指标已随门口路由重构移除（agent 路线不产 category，与 golden 标签不对齐）。现以 ragas 质量 + 成本对比两路线。
 
 ### 3.3 成本：时延 + token（`eval/harness/meter.py`）
 
@@ -140,9 +139,8 @@ eval/
 ├── harness/           评测引擎
 │   ├── sut.py           被测系统适配器：DocQueryWorkflowSystem（带决策 flag）、AgentSystem、RagOutput
 │   ├── metrics.py       5 个 ragas 指标的字段映射 + 装配
-│   ├── report.py        展示+落盘共用：render_delta_table（分类准确率+5 ragas 列）/ write_detail_csv / default_result_paths
-│   ├── run_eval.py      单系统跑分：逐行 SUT→打分→聚合→单行表+md/detail CSV 落盘（默认 flags）
-│   └── compare.py       【主力】多变体 ablation，delta 表，--out 落盘 / --detail 明细 CSV（共用 report.py）
+│   ├── report.py        展示+落盘共用：render_delta_table（5 ragas+成本列）/ write_detail_csv / default_result_paths
+│   └── compare.py       【唯一入口】workflow vs agent 两路线 delta 表，--out 落盘 / --detail 明细 CSV（共用 report.py）
 ├── datagen/           测试集 + 金标准生成
 │   ├── generate_testset.py        ragas TestsetGenerator 自动生成草稿（A+B 中文约束）
 │   ├── build_split_candidates.py  造 split/other/retrievable（离散度筛子 + 措辞模板）
@@ -154,7 +152,7 @@ eval/
 ├── utils/
 │   └── jsonl_to_csv.py            testset jsonl → csv 便于人工看
 ├── dataset/           测试集与金标准数据
-└── results/           run_eval / compare 落盘的跑分表（md）+ 明细（detail.csv）
+└── results/           compare 落盘的跑分表（md）+ 明细（detail.csv）
 ```
 
 ---
@@ -162,17 +160,14 @@ eval/
 ## 7. 怎么跑
 
 ```powershell
-# 冒烟（前 5 条，确认链路通）
-python -m eval.harness.compare --testset eval/dataset/golden.jsonl --limit 5 --variants "baseline(全单轮)" "+probe"
+# 冒烟（前 2 条，确认链路通）
+python -m eval.harness.compare --testset eval/dataset/golden.jsonl --limit 2
 
-# 全量对比表，落盘到 docs/（--detail 另存每条明细 CSV）
-python -m eval.harness.compare --testset eval/dataset/golden.jsonl --variants "baseline(全单轮)" "+probe" --out docs/compare_golden.md --detail docs/compare_golden_detail.csv
+# 单路线（只跑 workflow）
+python -m eval.harness.compare --testset eval/dataset/golden.jsonl --variants workflow
 
-# 逐步加决策
-python -m eval.harness.compare --testset eval/dataset/golden.jsonl --variants "baseline(全单轮)" "+probe" "+probe+split" "全开"
-
-# 对照：workflow 全开 vs agent 自主规划（同表，agent 行分类准确率列为 —）
-python -m eval.harness.compare --testset eval/dataset/golden.jsonl --variants "全开" "agent(自主规划)"
+# 全量对比表，落盘到 docs/
+python -m eval.harness.compare --testset eval/dataset/golden.jsonl --out docs/compare.md --detail docs/compare_detail.csv
 
 # 其它入口：生成测试集 / 造金标准 / 补 reference
 python -m eval.datagen.generate_testset --size 50
@@ -181,13 +176,13 @@ python -m eval.datagen.merge_golden
 python -m eval.datagen.fill_reference
 ```
 
-**变体矩阵**（`compare.VARIANTS`）：`baseline(全单轮)` / `+probe` / `+probe+split` / `全开`，每个是一组决策 flag 的 on-off。
+**路线**（`compare.VARIANTS`）：`workflow`（DocQueryWorkflow 默认 flags） / `agent`（AutoAgent 自主规划）。
 
 **注意**：
 - 先激活 `.venv`，`.env` 要有 `DEEPSEEK_API_KEY`。
 - 花 LLM 调用：每条 × 每变体 = 1 次作答 + 5 指标。冒烟用 `--limit`。
-- 金标准没填 `reference` → `context_recall`/`factual_correctness` 列为 `—`，看**分类准确率**列即可。
-- `compare` 显示分类准确率 + 全 5 个 ragas 指标；`--detail` 可导出每条明细 CSV（含参考答案/SUT答案/逐条指标）。
+- 金标准没填 `reference` → `context_recall`/`factual_correctness` 列为 `—`。
+- `compare` 显示 5 ragas + 2 成本列；`--detail` 可导出每条明细 CSV。
 
 ---
 
@@ -197,7 +192,7 @@ python -m eval.datagen.fill_reference
 2. **probe 偏向 retrievable**：probe 提供召回证据会把 judge 推向 retrievable，利于 faithfulness 接地，但对边界 ambiguous 题有害（实测把"自适应哈希索引好用吗"从 ambiguous 翻成 retrievable）。
 3. **当前 golden 集对 probe 不公平**：全是 MySQL（judge 本就认识）+ 概念重叠的 OOB，**缺 probe 该救的"在库不认识专名"样本**（如 OpenClaw 书的 SOUL.md/Cron）。导致首张全量表里 +probe 分类准确率不升反降（0.70→0.61），**不能据此判 probe 没用**。
 
-> 已修：旧 `BookRagWorkflow` 及其评测装配（`BookRagWorkflowSystem`）已退役删除，`run_eval` 与 `compare` 现统一接当前 `DocQueryWorkflow`。
+> 已修：旧 `BookRagWorkflow` 及其评测装配（`BookRagWorkflowSystem`）已退役删除。`run_eval` 已并入 `compare`，现仅 `compare` 唯一入口，测 workflow vs agent 两路线。
 
 ---
 

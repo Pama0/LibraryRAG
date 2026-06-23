@@ -1,7 +1,7 @@
 """从 book chroma 切片用 ragas TestsetGenerator 生成测试集草稿。
 
 走"复用已切块"路线：把 chroma 片段包成 LangChain Document，喂 generate_with_chunks。
-产出 dataset/testset.draft.jsonl，人工校验后另存为 testset.jsonl 供 run_eval 使用。
+产出 dataset/testset.draft.jsonl，人工校验后另存为 testset.jsonl 供 compare 使用。
 运行（项目根目录）：python -m eval.datagen.generate_testset --size 50
 """
 import argparse
@@ -174,7 +174,7 @@ async def generate(size: int, max_chunks: int | None = 60, seed: int = 42,
         for sample in eval_dataset.to_list():
             f.write(json.dumps(sample, ensure_ascii=False) + "\n")
     print(f"草稿已写入 {TESTSET_DRAFT_PATH}（共 {len(eval_dataset.to_list())} 条）")
-    print("[注意] 人工校验后另存为 testset.jsonl，再跑 run_eval。")
+    print("[注意] 人工校验后另存为 testset.jsonl，再跑 compare。")
 
 
 def main():
