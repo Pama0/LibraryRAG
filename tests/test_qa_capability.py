@@ -1148,7 +1148,7 @@ async def test_answer_multi_subject_explain_out_of_scope_does_not_abort_turn():
     # 回归（Critical）：多子问题中一个 explain 抛 OutOfScope，整轮不能被中断，
     # 兄弟子问题答案必须出现在最终返回文本里。
     from core.workflow.qa_capability import _SubDecision
-    from core.workflow.front_door import RoutedSubQuery
+    from core.workflow.components.front_door import RoutedSubQuery
     qa = _qa()
 
     ds = {
@@ -1256,7 +1256,7 @@ def _qa_answer_stub(decisions, exec_map):
     返回 (qa, routed)：routed 是与 decisions 同序的 [RoutedSubQuery]（全 dispatch_qa），
     供 qa.answer 消费（Task 4：answer 改吃路由计划，不再自己 split）。
     """
-    from core.workflow.front_door import RoutedSubQuery
+    from core.workflow.components.front_door import RoutedSubQuery
     qa = _qa()
     di = {d.query: d for d in decisions}
     async def fake_decide(q, bt, probe=True, disable_scope=False): return di[q]
@@ -1337,7 +1337,7 @@ async def test_answer_multi_streams_match_returned_text():
 
 
 # ── answer 消费路由计划 + per-subq scope（Task 4）──────────────────────
-from core.workflow.front_door import RoutedSubQuery
+from core.workflow.components.front_door import RoutedSubQuery
 
 
 async def test_answer_consumes_routed_subqueries_per_subq_scope():

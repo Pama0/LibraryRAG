@@ -2,9 +2,10 @@
 
 与 book_rag.BookRagWorkflow 的本质区别：
 - 本 workflow 升为【顶层编排器】，持有并贯穿同一套会话 memory。
-- 门口准入节点（front_door.FrontDoorAgent）：读会话记忆消指代 + 规范化 → clean_query，
-  再四出口决策（dispatch_qa / dispatch_study_plan / converse / clarify），确定性 dispatch；
-  dispatch_qa 额外产【路由计划】（`sub_queries: list[RoutedSubQuery]` + `disable_scope`）。
+- 门口（components.new_front_door.FrontDoor）：三步各一次独立 LLM 调用——clean（读会话记忆
+  消指代 + 规范化 → clean_query）→ split_query（拆互不相同的子问题）→ route（给每个子问题判
+  出口：dispatch_qa / study_plan / converse / clarify）。dispatch_qa 产【路由计划】
+  （`sub_queries: list[RoutedSubQuery]`）。
 - QA capability（qa_capability.QaCapability，注入）：消费门口的路由计划，QA 子问题逐个
   判定（probe→admit→classify，含 per-subq scope）+ 按 category 路由到各分支【检索 + 流式
   合成】；converse 子问题直接装饰 reply，不检索。本 workflow 不再自持检索/合成实质逻辑，
@@ -38,8 +39,7 @@ from llama_index.core.workflow import (
     step,
 )
 
-from core.workflow.components.new_front_door import FrontDoor
-from core.workflow.front_door import FrontDoorAgent, RoutedSubQuery
+from core.workflow.components.front_door import FrontDoor, RoutedSubQuery
 from core.workflow.qa_capability import (  # noqa: F401  (事件类 re-export 供 api 层 import)
     AnswerDeltaEvent,
     EmptySkeleton,
@@ -114,13 +114,9 @@ class DocQueryWorkflow(Workflow):
         **kw,
     ):
         super().__init__(**kw)
-        # 门口 Router（消指代 + 规范化 + 意图分类）与 QA capability（降噪分类 + 检索合成）
+        # 门口 FrontDoor（净化/拆分/路由三步解耦）与 QA capability（降噪分类 + 检索合成）
         # 各自独立、各自可测。检索/合成实质逻辑全在 qa，本 workflow 只编排 + 委托。
-        self.front_door = FrontDoorAgent(
-            llm, index_manager, probe_retriever=make_retriever(probe_retriever)
-        )
-        # 新门口（净化/拆分解耦版），逐步取代 FrontDoorAgent；先并存，老的暂不删。
-        self.new_front_door = FrontDoor(
+        self.front_door = FrontDoor(
             llm, index_manager, probe_retriever=make_retriever(probe_retriever)
         )
         self.qa = QaCapability(
@@ -156,7 +152,7 @@ class DocQueryWorkflow(Workflow):
     async def clean_question(self,ctx: Context, ev: CleanEvent) -> SplitEvent | DirectReplyEvent:
         original = await ctx.store.get("original_query")
         memory: Optional[ChatMemoryBuffer] = await ctx.store.get("memory")
-        clean_query, is_missing_info, missing_reason = await self.new_front_door.clean(
+        clean_query, is_missing_info, missing_reason = await self.front_door.clean(
             original, memory
         )
         # 缺信息（指代无法消解等）→ 不进检索，直接反问用户补全
@@ -169,7 +165,7 @@ class DocQueryWorkflow(Workflow):
     async def split_query(self, ctx: Context, ev: SplitEvent) -> RouteEvent:
         clean_query = await ctx.store.get("clean_query")
         book_titles = await ctx.store.get("book_titles")
-        subs = await self.new_front_door.split_query(clean_query, book_titles)
+        subs = await self.front_door.split_query(clean_query, book_titles)
         await ctx.store.set("sub_queries", subs)
         return RouteEvent()
 
@@ -180,7 +176,7 @@ class DocQueryWorkflow(Workflow):
         sub_texts = await ctx.store.get("sub_queries")     # split_query 存的 list[str]
         clean_query = await ctx.store.get("clean_query")
 
-        rr = await self.new_front_door.route(sub_texts)    # _RouteResultModel
+        rr = await self.front_door.route(sub_texts)    # _RouteResultModel
         routes = rr.routes
 
         # 聚合优先级：任一 dispatch_qa → QA；否则 study_plan → converse。
