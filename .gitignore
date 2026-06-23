@@ -19,7 +19,11 @@ build/
 # 向量数据库（运行时生成）
 chroma_db/
 chroma_db_single_test/
+core/rag/chroma/
 storage/
+
+# 已退役的法条语料（项目转 book-only，法条入 legacy；不随仓库分发）
+data/legal_documents/
 
 # SQLite 数据库（运行时生成）
 *.db
@@ -61,4 +65,10 @@ CLAUDE.md
 # eval 生成的临时产物
 eval/dataset/_gen_run.log
 eval/dataset/testset.draft.jsonl
+eval/dataset/testset.draft.csv
 eval/results/
+
+# eval 运行产物误入 docs（对比表/明细/引用图，脚本可重生）
+docs/citation_map.md
+docs/compare_golden.md
+docs/compare_golden_detail.csv
