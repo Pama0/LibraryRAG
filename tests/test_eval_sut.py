@@ -19,26 +19,23 @@ class _RespMeta:
         self.metadata = metadata
 
 
-def test_doc_answered_with_category():
-    r = _RespMeta("答案", [_NodeWithScore("片段")], {"category": "retrievable", "intent": "qa"})
+def test_doc_answered():
+    r = _RespMeta("答案", [_NodeWithScore("片段")], {"intent": "qa"})
     out = map_doc_result(r, response_cls=_RespMeta)
     assert out.outcome == "answered"
-    assert out.category == "retrievable"
     assert out.retrieved_contexts == ["片段"]
 
 
 def test_doc_empty_when_no_nodes():
-    r = _RespMeta("反问句", [], {"category": "missing_info", "intent": "qa"})
+    r = _RespMeta("反问句", [], {"intent": "qa"})
     out = map_doc_result(r, response_cls=_RespMeta)
     assert out.outcome == "empty"
-    assert out.category == "missing_info"
 
 
 def test_doc_handles_missing_metadata():
     r = _RespMeta("答案", [_NodeWithScore("片段")], None)
     out = map_doc_result(r, response_cls=_RespMeta)
     assert out.outcome == "answered"
-    assert out.category == ""   # 无 metadata → category 空，不报错
 
 
 # ── map_agent_result：自主 Agent 的 (answer, sources) ──
@@ -50,13 +47,11 @@ def test_agent_answered_with_sources():
     assert out.outcome == "answered"
     assert out.response == "综合答案"
     assert out.retrieved_contexts == ["片段A", "片段B"]
-    assert out.category == ""          # agent 不产分类
 
 
 def test_agent_empty_when_no_sources():
     out = map_agent_result("答案", [])
     assert out.outcome == "empty"
-    assert out.category == ""
 
 
 def test_agent_empty_when_blank_answer():
@@ -98,7 +93,6 @@ async def test_agent_system_answered(monkeypatch):
     assert out.outcome == "answered"
     assert out.response == "综合答案"
     assert out.retrieved_contexts == ["片段A", "片段B"]
-    assert out.category == ""
     # 复用 AutoAgent.run 时传入的是 _NullCtx
     assert isinstance(_FakeAutoAgent.last_instance.run_args["ctx"], _NullCtx)
 
@@ -116,4 +110,3 @@ async def test_agent_system_error_is_caught(monkeypatch):
     out = await sut.answer("boom")
     assert out.outcome == "error"
     assert "RuntimeError" in out.response
-    assert out.category == ""

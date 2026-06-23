@@ -11,8 +11,7 @@ from typing import Protocol, runtime_checkable
 class RagOutput:
     response: str
     retrieved_contexts: list[str]
-    outcome: str  # answered | clarify | split | empty | error
-    category: str = ""  # judge 判的 category（评测分类准确率用）
+    outcome: str  # answered | empty | error
 
 
 @runtime_checkable
@@ -22,19 +21,17 @@ class RagSystem(Protocol):
 
 # ── 当前系统（DocQueryWorkflow）适配器 ──────────────────────────────
 def map_doc_result(result, response_cls=None) -> RagOutput:
-    """DocQueryWorkflow.run() 的 Response → RagOutput（读 metadata.category）。"""
+    """DocQueryWorkflow.run() 的 Response → RagOutput（有 nodes→answered，无→empty）。"""
     if response_cls is None:
         from llama_index.core.base.response.schema import Response as response_cls  # noqa: N813
-    meta = getattr(result, "metadata", None) or {}
-    category = meta.get("category", "") or ""
     if isinstance(result, response_cls):
         text = (getattr(result, "response", None) or "").strip()
         nodes = getattr(result, "source_nodes", None) or []
         if not text or not nodes:
-            return RagOutput(text, [], "empty", category)
+            return RagOutput(text, [], "empty")
         contexts = [n.node.get_content() for n in nodes]
-        return RagOutput(text, contexts, "answered", category)
-    return RagOutput(str(result), [], "empty", category)
+        return RagOutput(text, contexts, "answered")
+    return RagOutput(str(result), [], "empty")
 
 
 def _node_text(n) -> str:
@@ -43,12 +40,12 @@ def _node_text(n) -> str:
 
 
 def map_agent_result(answer: str, sources: list) -> RagOutput:
-    """AutoAgent.run() 的 (answer, source_nodes) → RagOutput；agent 不产分类，category 恒空。"""
+    """AutoAgent.run() 的 (answer, source_nodes) → RagOutput。"""
     text = (answer or "").strip()
     if not text or not sources:
-        return RagOutput(text, [], "empty", "")
+        return RagOutput(text, [], "empty")
     contexts = [_node_text(n) for n in sources]
-    return RagOutput(text, contexts, "answered", "")
+    return RagOutput(text, contexts, "answered")
 
 
 class DocQueryWorkflowSystem:
@@ -73,7 +70,7 @@ class DocQueryWorkflowSystem:
         try:
             result = await wf.run(query=query, book_titles=book_titles)
         except Exception as e:  # noqa: BLE001 — 单条异常记 error 不中断
-            return RagOutput(f"{type(e).__name__}: {e}", [], "error", "")
+            return RagOutput(f"{type(e).__name__}: {e}", [], "error")
         return map_doc_result(result)
 
 
@@ -107,5 +104,5 @@ class AgentSystem:
         try:
             answer, sources = await agent.run(_NullCtx(), query, book_titles)
         except Exception as e:  # noqa: BLE001 — 单条异常记 error 不中断
-            return RagOutput(f"{type(e).__name__}: {e}", [], "error", "")
+            return RagOutput(f"{type(e).__name__}: {e}", [], "error")
         return map_agent_result(answer, sources)
