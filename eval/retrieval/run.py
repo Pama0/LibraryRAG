@@ -8,6 +8,7 @@ import asyncio
 import csv
 import json
 import os
+from datetime import datetime, timezone
 
 from configs.embedding import configure_embedding
 from core.rag.data_loader import RAGIndexManager
@@ -23,7 +24,8 @@ from eval.retrieval.metrics import (
 )
 
 RESULT_CSV = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "results", "retrieval_eval.csv"
+    os.path.dirname(os.path.abspath(__file__)), "results",
+    f"retrieval_eval_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
 )
 
 
@@ -92,15 +94,21 @@ async def _eval_retriever(name: str, labels: list[dict], idx) -> tuple[dict, lis
     return aggregate(per_rows), detail
 
 
-def _render_table(results: list[tuple[str, dict]]) -> str:
-    """results: [(name, 聚合均值)]。→ Markdown 对比表。"""
+def _render_table(results: list[tuple[str, dict]], sample_count: int) -> str:
+    """results: [(name, 聚合均值)]。→ Markdown 对比表，末尾带跨 retriever 总和行。"""
     cols = _metric_cols()
-    header = "| retriever | " + " | ".join(cols) + " |"
+    header = f"| retriever ({sample_count} 样本) | " + " | ".join(cols) + " |"
     sep = "|" + "---|" * (len(cols) + 1)
     lines = [header, sep]
     for name, agg in results:
         cells = [f"{agg.get(c):.3f}" if agg.get(c) is not None else "—" for c in cols]
         lines.append(f"| {name} | " + " | ".join(cells) + " |")
+
+    # 跨 retriever 总和行（对各列所有 variant 的均值再求均值）
+    if len(results) > 1:
+        total = aggregate([agg for _, agg in results])
+        cells = [f"{total.get(c):.3f}" if total.get(c) is not None else "—" for c in cols]
+        lines.append(f"| **总计** | " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 
@@ -128,7 +136,7 @@ async def main(retrievers: list[str]) -> None:
         results.append((name, agg))
         all_detail += detail
 
-    print(_render_table(results))
+    print(_render_table(results, len(labels)))
     _write_csv(all_detail, RESULT_CSV)
     print(f"\n明细已写 {RESULT_CSV}")
 
