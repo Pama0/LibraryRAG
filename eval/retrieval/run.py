@@ -112,7 +112,7 @@ def _render_table(results: list[tuple[str, dict]], sample_count: int) -> str:
     return "\n".join(lines)
 
 
-def _write_csv(all_detail: list[dict], path: str) -> None:
+def _write_csv(all_detail: list[dict], aggregates: list[tuple[str, dict]], path: str) -> None:
     cols = ["variant", "user_input", "category"] + _metric_cols()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
@@ -121,6 +121,11 @@ def _write_csv(all_detail: list[dict], path: str) -> None:
         for d in all_detail:
             w.writerow({k: (f"{v:.4f}" if isinstance(v, float) else v)
                         for k, v in d.items()})
+        # 每个 variant 的聚合均值追加在明细末尾
+        for name, agg in aggregates:
+            row = {"variant": name, "user_input": "", "category": ""}
+            row.update({k: f"{v:.4f}" for k, v in agg.items() if v is not None})
+            w.writerow(row)
 
 
 async def main(retrievers: list[str]) -> None:
@@ -137,7 +142,7 @@ async def main(retrievers: list[str]) -> None:
         all_detail += detail
 
     print(_render_table(results, len(labels)))
-    _write_csv(all_detail, RESULT_CSV)
+    _write_csv(all_detail, results, RESULT_CSV)
     print(f"\n明细已写 {RESULT_CSV}")
 
 
