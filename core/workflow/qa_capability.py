@@ -363,6 +363,59 @@ class QaCapability:
             parts.append(tail)
         return "".join(parts).strip(), all_nodes, meta
 
+    async def run_workers(
+        self,
+        ctx: Context,
+        sub_queries: list,                 # list[RoutedSubQuery]
+        book_titles: Optional[list[str]],
+        probe: bool = True,
+        disable_scope: bool = False,
+    ) -> tuple[list["Material"], list, dict]:
+        """并发执行路由计划，产【材料】给统一合成 agent（worker 全程不外流 token）。
+
+        阶段一：并行判定 dispatch_qa 子问题（probe→admit→classify）。
+        阶段二：每个子问题一个 worker 协程，asyncio.gather 并发；ok 子问题用 _execute_subq
+        在 _DeltaSuppressingCtx 下执行（散文分答案取返回值，AnswerDeltaEvent 被吞）。
+        converse / missing_info / out_of_scope 子问题不执行，只产对应 Material 标记。
+        """
+        qa_subs = [s for s in sub_queries if s.action == "dispatch_qa"]
+        decided = await asyncio.gather(
+            *(self._decide_subq(s.query, book_titles, probe=probe, disable_scope=disable_scope)
+              for s in qa_subs)
+        )
+        # 依赖 splitter 产出的子问题文本互不相同（铁律已约束）
+        by_query = {d.query: d for d in decided}
+        wctx = _DeltaSuppressingCtx(ctx)
+
+        async def worker(s) -> "Material":
+            if s.action == "converse":
+                return Material(query=s.query, verdict="converse")
+            d = by_query.get(s.query)
+            if d is None:
+                return Material(query=s.query, verdict="out_of_scope")
+            if d.verdict == "missing_info":
+                return Material(
+                    query=s.query, verdict="missing_info",
+                    reason=(d.clarify_question or d.reason),
+                )
+            if d.verdict == "out_of_scope":
+                return Material(query=s.query, verdict="out_of_scope", reason=d.reason)
+            ans, nodes = await self._execute_subq(wctx, d.query, d.category, d.scope)
+            return Material(
+                query=s.query, answer=ans, nodes=nodes, verdict="ok", category=d.category,
+            )
+
+        materials = list(await asyncio.gather(*(worker(s) for s in sub_queries)))
+        nodes = [n for m in materials for n in m.nodes]
+        oks = [m for m in materials if m.verdict == "ok"]
+        meta = {
+            "categories": [m.category for m in oks],
+            "sub_count": len(sub_queries),
+            "category": (oks[0].category if oks else "out_of_scope")
+            if len(sub_queries) == 1 else "multi",
+        }
+        return materials, nodes, meta
+
     @staticmethod
     def _compose_tail(oos: list, missing: list) -> str:
         """合并末尾提示：库外子问题如实告知 + 信息不足子问题反问。"""
